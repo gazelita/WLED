@@ -16,7 +16,15 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: pio run -e punto1
+      - run: pio run -e punto1 2>&1 | tee build.log
+      - name: Diagnostic
+        run: |
+          echo "::notice::user_fx dans le log: $(grep -ci user_fx build.log)"
+          echo "::notice::audioreactive dans le log: $(grep -ci audioreactive build.log)"
+          echo "::notice::Musique bass dans le bin: $(grep -ac 'Musique bass' .pio/build/punto1/firmware.bin)"
+          echo "::notice::Morse Code dans le bin: $(grep -ac 'Morse Code' .pio/build/punto1/firmware.bin)"
+          echo "::notice::Spinning Wheel dans le bin: $(grep -ac 'Spinning Wheel' .pio/build/punto1/firmware.bin)"
+          echo "::notice::Lignes usermods: $(grep -i 'usermod' build.log | head -5 | tr '\n' ' | ')"
       - uses: actions/upload-artifact@v4
         with:
           name: firmware-punto1
