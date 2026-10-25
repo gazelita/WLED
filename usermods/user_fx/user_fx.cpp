@@ -1259,6 +1259,7 @@ static const char _data_FX_MODE_MORSECODE[] PROGMEM = "Morse Code@Speed,,,,Color
 
 
 
+
 /////////////////////////////////////////////////////////////
 //  Effets "Phare" : colonne de 4 ampoules, 0 = bas, 3 = haut
 //  Reagissent au micro (usermod AudioReactive)
@@ -1283,6 +1284,7 @@ struct PhareState {
   float    stp[PHARE_MAX];    // pas de fondu (bougies)
   float    pk[4], av[4];      // son : pic et moyenne par bande (basses, mediums, aigus, volume)
   uint32_t lb[4];             // son : dernier coup par bande
+  float    pv[4], fa[4];      // son : valeur precedente et moyenne des "attaques" par bande
   float    q;                 // libre (pic du VU-metre, energie...)
 };
 
@@ -1381,7 +1383,7 @@ static PhareSon phareEcoute(PhareState* s, uint32_t dt) {
   um_data_t* um = phareAudio();
   uint8_t* fft = (uint8_t*)um->u_data[2];
   float raw[4] = {
-    (fft[0] + fft[1] + fft[2]) / 3.0f,                  // basses
+    (fft[0] + fft[1]) / 2.0f,                            // basses (kick : ~40-90 Hz)
     (fft[5] + fft[6] + fft[7] + fft[8] + fft[9]) / 5.0f,  // mediums
     (fft[12] + fft[13] + fft[14] + fft[15]) / 4.0f,       // aigus
     *(float*)um->u_data[0]                                // volume
@@ -1399,8 +1401,12 @@ static PhareSon phareEcoute(PhareState* s, uint32_t dt) {
     float marge = max(s->pk[i] - s->av[i], 12.0f);
     float n = (v - s->av[i]) / marge;
     out[i] = constrain((n - plancher * 0.5f) / (1.0f - plancher * 0.5f), 0.0f, 1.0f);
-    beat[i] = v > s->av[i] * k && v > s->pk[i] * 0.5f && strip.now - s->lb[i] > (i == 0 ? 180u : 90u);
+    float attaque = max(0.0f, v - s->pv[i]);             // de combien le son vient de monter
+    s->pv[i] = v;
+    beat[i] = attaque > s->fa[i] * (k + 0.8f) + 6.0f && v > s->pk[i] * 0.45f
+              && strip.now - s->lb[i] > (i == 0 ? 200u : 90u);
     if (beat[i]) s->lb[i] = strip.now;
+    s->fa[i] = s->fa[i] * 0.93f + attaque * 0.07f;
     s->av[i] = s->av[i] * 0.9f + v * 0.1f; if (s->av[i] < 6.0f) s->av[i] = 6.0f;   // moyenne sur ~0,25 s
   }
   return {out[0], out[1], out[2], out[3], beat[0], beat[1], beat[2]};
@@ -1414,11 +1420,11 @@ static void mode_phare_bass(void) {
   PhareSon son = phareEcoute(s, dt);
   unsigned half = n / 2;
   phareDecay(s, n, dt, phareRetombee(SEGMENT.speed));
-  for (unsigned i = 0; i < half; i++) s->level[i] = max(s->level[i], son.b);
+  if (son.bb) for (unsigned i = 0; i < half; i++) s->level[i] = 1.0f;   // le bas : uniquement les coups de basse
   if (son.tb) { s->side = (s->side + 1) % (n - half); s->level[half + s->side] = 1.0f; }
   phareDraw(s, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_BASS[] PROGMEM = "01 Musique bass@Retombee,Sensibilite,Veilleuse,Seuil;!;;1f;sx=150,ix=128,c1=0,c2=30";
+static const char _data_FX_MODE_PHARE_BASS[] PROGMEM = "01 Musique bass@Retombee,Sensibilite,Veilleuse,Seuil;!;;1f;sx=200,ix=128,c1=0,c2=30";
 
 // 02. Clignotant musical : ampoule 2 = basses, 1 et 3 = mediums (en alternance), 4 = aigus
 static void mode_phare_clignomusic(void) {
@@ -1427,8 +1433,7 @@ static void mode_phare_clignomusic(void) {
   PhareSon son = phareEcoute(s, dt);
   phareDecay(s, n, dt, phareRetombee(SEGMENT.speed));
   unsigned lb = min(1u, n - 1), lt = n - 1;
-  s->level[lb] = max(s->level[lb], son.b);
-  if (son.bb) s->level[lb] = 1.0f;                       // ampoule 2 : flash sur chaque basse
+  if (son.bb) s->level[lb] = 1.0f;                       // ampoule 2 : uniquement les coups de basse
   if (son.mb) {                                          // mediums : les autres ampoules, chacune son tour
     unsigned tries = 0;
     do { s->side = (s->side + 1) % n; } while ((s->side == lb || s->side == lt) && ++tries < n);
