@@ -1259,7 +1259,6 @@ static const char _data_FX_MODE_MORSECODE[] PROGMEM = "Morse Code@Speed,,,,Color
 
 
 
-
 /////////////////////////////////////////////////////////////
 //  Effets "Phare" : colonne de 4 ampoules, 0 = bas, 3 = haut
 //  Reagissent au micro (usermod AudioReactive)
@@ -1396,11 +1395,13 @@ static PhareSon phareEcoute(PhareState* s, uint32_t dt) {
     float v = phareSeuil(raw[i]);
     if (SEGENV.call == 0) { s->pk[i] = 40.0f; s->av[i] = 20.0f; }
     s->pk[i] = max(v, max(s->pk[i] * decroit, 25.0f));
-    float n = v / s->pk[i];
-    out[i] = constrain((n - plancher) / (1.0f - plancher), 0.0f, 1.0f);
+    // "punch" : ce qui depasse la moyenne recente ; un son continu (basse tenue) retombe a 0
+    float marge = max(s->pk[i] - s->av[i], 12.0f);
+    float n = (v - s->av[i]) / marge;
+    out[i] = constrain((n - plancher * 0.5f) / (1.0f - plancher * 0.5f), 0.0f, 1.0f);
     beat[i] = v > s->av[i] * k && v > s->pk[i] * 0.5f && strip.now - s->lb[i] > (i == 0 ? 180u : 90u);
     if (beat[i]) s->lb[i] = strip.now;
-    s->av[i] = s->av[i] * 0.95f + v * 0.05f; if (s->av[i] < 6.0f) s->av[i] = 6.0f;
+    s->av[i] = s->av[i] * 0.9f + v * 0.1f; if (s->av[i] < 6.0f) s->av[i] = 6.0f;   // moyenne sur ~0,25 s
   }
   return {out[0], out[1], out[2], out[3], beat[0], beat[1], beat[2]};
 }
@@ -1427,6 +1428,7 @@ static void mode_phare_clignomusic(void) {
   phareDecay(s, n, dt, phareRetombee(SEGMENT.speed));
   unsigned lb = min(1u, n - 1), lt = n - 1;
   s->level[lb] = max(s->level[lb], son.b);
+  if (son.bb) s->level[lb] = 1.0f;                       // ampoule 2 : flash sur chaque basse
   if (son.mb) {                                          // mediums : les autres ampoules, chacune son tour
     unsigned tries = 0;
     do { s->side = (s->side + 1) % n; } while ((s->side == lb || s->side == lt) && ++tries < n);
@@ -1454,15 +1456,16 @@ static void mode_phare_flamme(void) {
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   PhareSon son = phareEcoute(s, dt);
   float cible = max(son.v, son.b);
-  float up = 0.08f + SEGMENT.speed / 255.0f * 0.5f;
-  if (cible > s->env) s->env += (cible - s->env) * up; else s->env += (cible - s->env) * up * 0.2f;
-  float h = 0.3f + s->env * (n - 0.3f);                 // hauteur de flamme, en ampoules
+  float up = 0.15f + SEGMENT.speed / 255.0f * 0.6f;
+  if (cible > s->env) s->env += (cible - s->env) * up;
+  else s->env = max(0.0f, s->env - dt / 900.0f);       // retombe en ~1 s
+  float h = 0.6f + s->env * (n - 0.6f);                 // hauteur de flamme, en ampoules
   float braise = SEGMENT.custom1 / 255.0f;
   float lv[PHARE_MAX];
   for (unsigned i = 0; i < n; i++) {
     float f = constrain(h - i, 0.0f, 1.0f);
-    float vac = 1.0f - (hw_random8() / 255.0f) * (0.25f + 0.5f * (float)i / n);
-    lv[i] = f * vac * (0.35f + 0.65f * s->env);         // plus de son = plus lumineux
+    float vac = 1.0f - (hw_random8() / 255.0f) * 0.45f;                 // toute la colonne vacille
+    lv[i] = f * vac * (0.25f + 0.75f * s->env);
   }
   lv[0] = max(lv[0], braise * (0.7f + hw_random8() / 850.0f));
   phareShow(lv, n, 0);
@@ -1506,13 +1509,13 @@ static void mode_phare_vumetre(void) {
   unsigned n = phareN(); if (n < 2) FX_FALLBACK_STATIC;
   PhareSon son = phareEcoute(s, dt);
   float cible = max(son.v, son.b) * n;
-  if (cible > s->env) s->env = cible; else s->env += (cible - s->env) * 0.15f;
+  if (cible > s->env) s->env = cible; else s->env = max(0.0f, s->env - dt / 250.0f);
   if (s->env >= s->q) { s->q = s->env; s->t0 = strip.now; }              // nouveau pic
   else if (strip.now - s->t0 > 400) s->q = max(0.0f, s->q - dt / map(SEGMENT.speed, 0, 255, 900, 120)); // retombe
   float lv[PHARE_MAX];
   unsigned pic = (unsigned)min((float)(n - 1), max(0.0f, s->q - 0.5f));
   for (unsigned i = 0; i < n; i++) lv[i] = constrain(s->env - i, 0.0f, 1.0f) * 0.8f;
-  if (s->q > 0.6f) lv[pic] = 1.0f;
+  if (s->q > 0.6f && s->q > s->env + 0.3f) lv[pic] = 1.0f;          // le pic, seulement au-dessus de la barre
   phareShow(lv, n, SEGMENT.custom1);
 }
 static const char _data_FX_MODE_PHARE_VUMETRE[] PROGMEM = "07 VU-metre a pic@Chute du pic,Sensibilite,Veilleuse,Seuil;!;;1v;sx=128,ix=128,c1=0,c2=30";
@@ -1543,20 +1546,27 @@ static void mode_phare_drop(void) {
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   PhareSon son = phareEcoute(s, dt);
   bool calme = s->t0 && strip.now - s->t0 > 2000;     // plus de 2 s sans basse = montee
-  if (son.bb && calme) s->t1 = strip.now + 2500 + SEGMENT.speed * 12;   // la basse revient : DROP
+  if (son.bb && calme) s->t1 = strip.now + 800 + SEGMENT.speed * 8;    // la basse revient : DROP
   if (son.b < 0.25f) { if (!s->t0) s->t0 = strip.now; } else s->t0 = 0;
   float lv[PHARE_MAX];
   if (strip.now < s->t1) {                               // stroboscope
     bool on = (strip.now / 45) % 2 == 0;
     for (unsigned i = 0; i < n; i++) lv[i] = on ? 1.0f : 0.0f;
   } else {                                               // en attendant : lueur qui suit la musique
-    s->env += (son.v * 0.5f - s->env) * 0.1f;
-    for (unsigned i = 0; i < n; i++) lv[i] = s->env * (1.0f - 0.15f * i);
-    if (son.bb) for (unsigned i = 0; i < n; i++) lv[i] = max(lv[i], 0.7f);
+    s->env += (son.v * 0.18f - s->env) * 0.1f;           // lueur faible pendant la montee
+    for (unsigned i = 0; i < n; i++) lv[i] = s->env * (1.0f - 0.2f * i);
   }
   phareShow(lv, n, SEGMENT.custom1);
 }
 static const char _data_FX_MODE_PHARE_DROP[] PROGMEM = "09 Drop@Duree du strobo,Sensibilite,Veilleuse,Seuil;!;;1f;sx=80,ix=128,c1=0,c2=30";
+
+// stroboscope court (utilise par le DJ au moment du drop)
+static void mode_phare_strobo(void) {
+  unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
+  bool on = (strip.now / 45) % 2 == 0;
+  float lv[PHARE_MAX]; for (unsigned i = 0; i < n; i++) lv[i] = on ? 1.0f : 0.0f;
+  phareShow(lv, n, 0);
+}
 
 // 10. Respiration musicale : respire lentement, plus fort quand la musique est forte
 static void mode_phare_respimusic(void) {
@@ -1750,16 +1760,8 @@ static void mode_phare_sos(void) {
   float lv[PHARE_MAX]; for (unsigned i = 0; i < n; i++) lv[i] = on ? 1.0f : 0.0f;
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_SOS[] PROGMEM = "29 SOS@Vitesse,,Veilleuse;!;;1;sx=128,c1=0";
+static const char _data_FX_MODE_PHARE_SOS[] PROGMEM = "28 SOS@Vitesse,,Veilleuse;!;;1;sx=128,c1=0";
 
-// Test ordre : une ampoule a la fois, 1 seconde chacune
-static void mode_phare_test(void) {
-  unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
-  unsigned k = (strip.now / 1000) % n;
-  float lv[PHARE_MAX]; for (unsigned i = 0; i < n; i++) lv[i] = (i == k) ? 1.0f : 0.0f;
-  phareShow(lv, n, 0);
-}
-static const char _data_FX_MODE_PHARE_TEST[] PROGMEM = "30 Test ordre@;!;;1";
 
 
 /////////////////////////////////////////////////////////////
@@ -1807,11 +1809,12 @@ static void mode_phare_coeur(void) {
   float t = (strip.now % (uint32_t)period) / period;
   if (SEGMENT.check2 && phareMusique()) { period = phareTempoMs; t = fmodf((millis() - phareTempoLast) / period, 1.0f); }
   float second = 0.3f + SEGMENT.intensity / 255.0f * 0.7f;
-  float b = expf(-t * 25.0f) + second * expf(-fmaxf(t - 0.22f, 0.0f) * 25.0f) * (t >= 0.22f ? 1.0f : 0.0f);
+  auto pulse = [](float x) { return x < 0 ? 0.0f : phareSmooth(x / 0.06f) * expf(-x * 9.0f); };   // montee et descente douces
+  float b = pulse(t) + second * pulse(t - 0.26f);
   float lv[PHARE_MAX]; for (unsigned i = 0; i < n; i++) lv[i] = min(b, 1.0f);
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_COEUR[] PROGMEM = "21 Battement de coeur@Rythme,Second battement,Veilleuse,,,,Suivre la musique;!;;1;sx=60,ix=150,c1=10,o2=1";
+static const char _data_FX_MODE_PHARE_COEUR[] PROGMEM = "21 Battement de coeur@Rythme,Second battement,Veilleuse,,,,Suivre la musique;!;;1;sx=35,ix=150,c1=10,o2=0";
 
 // Feux de detresse : clignotement avec montee et descente rapides comme une ampoule
 static void mode_phare_detresse(void) {
@@ -1843,28 +1846,6 @@ static void mode_phare_lava(void) {
 }
 static const char _data_FX_MODE_PHARE_LAVA[] PROGMEM = "23 Lava lampe@Vitesse,Bulles,Veilleuse;!;;1;sx=60,ix=120,c1=15";
 
-// Ascenseur : la lumiere glisse d'etage en etage, s'arrete, repart
-static void mode_phare_ascenseur(void) {
-  uint32_t dt; PhareState* s = phareInit(dt);
-  if (!s) FX_FALLBACK_STATIC;
-  unsigned n = phareN(); if (n < 2) FX_FALLBACK_STATIC;
-  float msEtage = map(SEGMENT.speed, 0, 255, 1200, 200);
-  if (SEGENV.call == 0) { s->p0 = 0; s->p1 = 0; s->t0 = strip.now; s->t1 = strip.now; }
-  float trajet = fabsf(s->p1 - s->p0) * msEtage;
-  float pause = 400.0f + (255 - SEGMENT.intensity) * 12.0f;
-  float el = strip.now - s->t0;
-  if (el > trajet + pause) {                                        // nouvel etage
-    s->p0 = s->p1;
-    unsigned nf; do { nf = hw_random8() % n; } while (nf == (unsigned)s->p0);
-    s->p1 = nf; s->t0 = strip.now; el = 0; trajet = fabsf(s->p1 - s->p0) * msEtage;
-  }
-  float u = trajet > 0 ? phareSmooth(el / trajet) : 1.0f;
-  float y = s->p0 + (s->p1 - s->p0) * u;
-  float lv[PHARE_MAX];
-  for (unsigned i = 0; i < n; i++) lv[i] = max(0.0f, 1.0f - fabsf((float)i - y));
-  phareShow(lv, n, SEGMENT.custom1);
-}
-static const char _data_FX_MODE_PHARE_ASCENSEUR[] PROGMEM = "24 Ascenseur@Vitesse,Pauses courtes,Veilleuse;!;;1;sx=120,ix=100,c1=10";
 
 // Orage : nuit calme, puis eclairs en rafales, plutot du haut
 static void mode_phare_orage(void) {
@@ -1883,7 +1864,7 @@ static void mode_phare_orage(void) {
   }
   phareDraw(s, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_ORAGE[] PROGMEM = "25 Orage@,Frequence,Ciel;!;;1;ix=40,c1=8";
+static const char _data_FX_MODE_PHARE_ORAGE[] PROGMEM = "24 Orage@,Frequence,Ciel;!;;1;ix=40,c1=8";
 
 // Neon defectueux : allume, avec des crises de gresillement a intervalle aleatoire (15 s minimum)
 static void mode_phare_neon(void) {
@@ -1907,7 +1888,7 @@ static void mode_phare_neon(void) {
   }
   phareShow(lv, n, 0);
 }
-static const char _data_FX_MODE_PHARE_NEON[] PROGMEM = "26 Neon defectueux@,Frequence des pannes;!;;1;ix=100";
+static const char _data_FX_MODE_PHARE_NEON[] PROGMEM = "25 Neon defectueux@,Frequence des pannes;!;;1;ix=100";
 
 // Phare marin : un faisceau tourne, la colonne s'illumine a chaque passage
 static void mode_phare_marin(void) {
@@ -1925,7 +1906,7 @@ static void mode_phare_marin(void) {
   }
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_MARIN[] PROGMEM = "27 Phare marin@Rotation,Largeur faisceau,Veilleuse,,,Double eclat;!;;1;sx=90,ix=110,c1=20";
+static const char _data_FX_MODE_PHARE_MARIN[] PROGMEM = "26 Phare marin@Rotation,Largeur faisceau,Veilleuse,,,Double eclat;!;;1;sx=90,ix=110,c1=20";
 
 // Pluie : des gouttes tombent du haut, plusieurs a la fois
 static void mode_phare_pluie(void) {
@@ -1951,7 +1932,7 @@ static void mode_phare_pluie(void) {
   }
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_PLUIE[] PROGMEM = "28 Pluie@Vitesse,Densite,Veilleuse;!;;1;sx=110,ix=80,c1=0";
+static const char _data_FX_MODE_PHARE_PLUIE[] PROGMEM = "27 Pluie@Vitesse,Densite,Veilleuse;!;;1;sx=110,ix=80,c1=0";
 
 // masque tous les effets qui ne sont pas ceux du phare (sauf Solid)
 static const char _data_PHARE_HIDDEN[] PROGMEM = "RSVD";
@@ -2019,7 +2000,7 @@ static void mode_phare_dj(void) {
 
   static const PhareChoix bougie[]  = {{mode_phare_bougies, 96, 224, 90, 0, false, false}};
   static const PhareChoix calme[]   = {{mode_phare_respimusic, 100, 128, 0, 30, false, false}, {mode_phare_flamme, 128, 128, 40, 30, false, false}};
-  static const PhareChoix drop[]    = {{mode_phare_drop, 80, 128, 0, 30, false, false}};
+  static const PhareChoix drop[]    = {{mode_phare_strobo, 0, 0, 0, 0, false, false}};
   static const PhareChoix basse[]   = {{mode_phare_explosion, 140, 128, 0, 30, false, false}, {mode_phare_roll_bass, 120, 128, 20, 30, false, false},
                                        {mode_phare_bass, 150, 128, 0, 30, false, false},      {mode_phare_echo, 110, 128, 0, 30, false, false}};
   static const PhareChoix aigu[]    = {{mode_phare_artifice, 180, 140, 0, 30, false, false}, {mode_phare_clignomusic, 190, 128, 0, 30, false, false}};
@@ -2028,18 +2009,19 @@ static void mode_phare_dj(void) {
   static const uint8_t     nbCat[]  = {1, 2, 1, 4, 2, 2};
 
   uint8_t cat;
+  bool montee = strip.now - d->sansBasse > 2500 && d->energie > 8;     // plus de basse : ca monte
+  if (montee) d->verrou = 1;                                           // on attend le retour de la basse
+  else if (d->verrou == 1) d->verrou = strip.now + 1500;               // la basse revient : drop 1,5 s
   if (strip.now - d->silence > 3000)                       cat = 0;   // silence
-  else if (strip.now - d->sansBasse > 2500 && d->energie > 8) cat = 2; // montee sans basse : on prepare le drop
-  else if (d->energie < 25)                                cat = 1;   // calme
+  else if (d->verrou > 1 && strip.now < d->verrou)         cat = 2;   // DROP
+  else if (montee || d->energie < 25)                      cat = 1;   // calme / montee
   else if (phareMusique() && d->basses > d->aigus * 1.3f)  cat = 3;   // basse forte et reguliere
   else if (d->aigus > d->basses * 0.9f)                    cat = 4;   // beaucoup d'aigus
   else                                                     cat = 5;
-  if (d->cat == 2 && cat != 2 && strip.now < d->verrou) cat = 2;      // laisse le drop exploser
-  if (cat == 2 && d->cat != 2) d->verrou = strip.now + 6000;
 
   uint32_t duree = map(SEGMENT.speed, 0, 255, 90000, 15000);         // changement dans une meme ambiance
   bool change = (SEGENV.call == 0);
-  if (cat != d->cat && (strip.now - d->choix > 6000 || cat == 0 || cat == 2 || d->cat == 255)) change = true;
+  if (cat != d->cat && (strip.now - d->choix > 6000 || cat == 0 || cat == 2 || d->cat == 2 || d->cat == 255)) change = true;
   if (strip.now - d->choix > duree) change = true;
   if (change) {
     if (cat != d->cat) a->idx = hw_random8() % nbCat[cat];
@@ -2066,15 +2048,15 @@ static void mode_phare_auto_anim(void) {
     {mode_phare_remplir, 150, 60, 0, 0, false, false},  {mode_phare_balle, 128, 128, 0, 0, false, false},
     {mode_phare_goutte, 128, 128, 0, 0, false, false},  {mode_phare_alternance, 120, 40, 0, 0, false, false},
     {mode_phare_clignotant, 128, 100, 0, 0, false, true}, {mode_phare_respiration, 60, 40, 255, 0, false, false},
-    {mode_phare_bougies, 96, 224, 0, 0, false, false},  {mode_phare_coeur, 60, 150, 10, 0, false, true},
+    {mode_phare_bougies, 96, 224, 110, 0, false, false},  {mode_phare_coeur, 35, 150, 10, 0, false, false},
     {mode_phare_detresse, 128, 60, 0, 0, false, true},  {mode_phare_lava, 60, 120, 15, 0, false, false},
-    {mode_phare_ascenseur, 120, 100, 10, 0, false, false}, {mode_phare_orage, 128, 60, 8, 0, false, false},
+    {mode_phare_orage, 128, 40, 8, 0, false, false},
     {mode_phare_neon, 128, 100, 0, 0, false, false},    {mode_phare_marin, 90, 110, 20, 0, false, false},
     {mode_phare_pluie, 110, 80, 0, 0, false, false},
   };
   phareAuto(liste, sizeof(liste) / sizeof(liste[0]));
 }
-static const char _data_FX_MODE_PHARE_AUTO_ANIM[] PROGMEM = "31 Auto animations@Duree par effet;!;;1;sx=200";
+static const char _data_FX_MODE_PHARE_AUTO_ANIM[] PROGMEM = "29 Auto animations@Duree par effet;!;;1;sx=200";
 
 /////////////////////////////////////////////////////////////
 //  Tache de fond : tempo de la musique + double clap
@@ -2148,15 +2130,13 @@ class UserFxUsermod : public Usermod {
     strip.addEffect(255, &mode_phare_coeur, _data_FX_MODE_PHARE_COEUR);
     strip.addEffect(255, &mode_phare_detresse, _data_FX_MODE_PHARE_DETRESSE);
     strip.addEffect(255, &mode_phare_lava, _data_FX_MODE_PHARE_LAVA);
-    strip.addEffect(255, &mode_phare_ascenseur, _data_FX_MODE_PHARE_ASCENSEUR);
     strip.addEffect(255, &mode_phare_orage, _data_FX_MODE_PHARE_ORAGE);
     strip.addEffect(255, &mode_phare_neon, _data_FX_MODE_PHARE_NEON);
     strip.addEffect(255, &mode_phare_marin, _data_FX_MODE_PHARE_MARIN);
     strip.addEffect(255, &mode_phare_pluie, _data_FX_MODE_PHARE_PLUIE);
     strip.addEffect(255, &mode_phare_sos, _data_FX_MODE_PHARE_SOS);
-    strip.addEffect(255, &mode_phare_test, _data_FX_MODE_PHARE_TEST);
     strip.addEffect(255, &mode_phare_auto_anim, _data_FX_MODE_PHARE_AUTO_ANIM);
-    static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_CLIGNOMUSIC, _data_FX_MODE_PHARE_ROLL_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_EXPLOSION, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_VUMETRE, _data_FX_MODE_PHARE_ECHO, _data_FX_MODE_PHARE_DROP, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ASCENSEUR, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_TEST, _data_FX_MODE_PHARE_AUTO_ANIM};
+    static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_CLIGNOMUSIC, _data_FX_MODE_PHARE_ROLL_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_EXPLOSION, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_VUMETRE, _data_FX_MODE_PHARE_ECHO, _data_FX_MODE_PHARE_DROP, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_AUTO_ANIM};
     phareMasquerNatifs(nos, sizeof(nos) / sizeof(nos[0]));
 
     // use id=255 for all custom user FX (the final id is assigned when adding the effect)
