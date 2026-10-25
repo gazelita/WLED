@@ -1259,6 +1259,7 @@ static const char _data_FX_MODE_MORSECODE[] PROGMEM = "Morse Code@Speed,,,,Color
 
 
 
+
 /////////////////////////////////////////////////////////////
 //  Effets "Phare" : colonne de 4 ampoules, 0 = bas, 3 = haut
 //  Reagissent au micro (usermod AudioReactive)
@@ -1474,7 +1475,7 @@ static void phareLoop() {
     T.lastTick = T.nextBeat;
     T.nextBeat += (uint32_t)T.period;
     T.beatCount++;
-    if (T.beatCount % 32 == 0) phareNouvellePhrase();
+    if (T.beatCount % 4 == 0 && hw_random8() < 90) phareNouvellePhrase();   // variation de kick
     if (phareCale()) phareKick(T.lastTick);               // cale : on flashe pile sur le temps
   }
   if (!phareKickActif()) T.conf = max(0.0f, T.conf - 0.0005f);
@@ -1706,7 +1707,7 @@ static void mode_phare_artifice(void) {
 }
 static const char _data_FX_MODE_PHARE_ARTIFICE[] PROGMEM = "06 Artifice@Brievete,Sensibilite,Veilleuse,Seuil;!;;1f;sx=180,ix=140,c1=0,c2=30";
 
-// 07. VU-metre a pic : la lumiere monte avec le volume, un point reste en haut puis retombe
+// 08. Niveau : la lumiere monte avec le volume, un point reste en haut puis retombe
 static void mode_phare_vumetre(void) {
   uint32_t dt; PhareState* s = phareInit(dt); if (!s) FX_FALLBACK_STATIC;
   unsigned n = phareN(); if (n < 2) FX_FALLBACK_STATIC;
@@ -1721,7 +1722,7 @@ static void mode_phare_vumetre(void) {
   if (s->q > 0.6f && s->q > s->env + 0.3f) lv[pic] = 1.0f;          // le pic, seulement au-dessus de la barre
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_VUMETRE[] PROGMEM = "08 VU-metre a pic@Chute du pic,Sensibilite,Veilleuse,Seuil;!;;1v;sx=128,ix=128,c1=0,c2=30";
+static const char _data_FX_MODE_PHARE_VUMETRE[] PROGMEM = "08 Niveau@Chute du pic,Sensibilite,Veilleuse,Seuil;!;;1v;sx=128,ix=128,c1=0,c2=30";
 
 // 08. Echo : chaque basse allume le bas, l'echo remonte en s'affaiblissant
 static void mode_phare_echo(void) {
@@ -2248,13 +2249,14 @@ static void phareAuto(const PhareChoix* liste, unsigned nb) {
 // 12. DJ auto : ecoute, calcule le tempo, choisit et enchaine les effets en rythme
 //   silence -> bougies ; break sans kick -> longs degrades ; montee -> roll qui accelere ;
 //   drop -> noir + explosion ; kick -> animations calees sur le tempo + couches kick / caisse claire / hi-hats
-struct PhareDJ { uint8_t cat, idx, etat; uint32_t choix, phrase, t; float roll; };
+struct PhareDJ { uint8_t cat, idx, etat; uint32_t choix, phrase, t; float roll; bool decide, suivant, flip; uint32_t mesure; uint8_t catRythme; };
 
+static bool phareFlip = false;
 static void phareJoue(const PhareChoix& c, bool change, int8_t vitesse) {
   uint8_t sx = SEGMENT.speed, ix = SEGMENT.intensity, c1 = SEGMENT.custom1, c2 = SEGMENT.custom2, c3 = SEGMENT.custom3;
   bool o1 = SEGMENT.check1, o2 = SEGMENT.check2, o3 = SEGMENT.check3; uint32_t appel = SEGENV.call;
   SEGMENT.speed = constrain((int)c.sx + vitesse, 0, 255); SEGMENT.intensity = c.ix; SEGMENT.custom1 = c.c1; SEGMENT.custom2 = c.c2;
-  SEGMENT.custom3 = 31; SEGMENT.check1 = c.o1; SEGMENT.check2 = c.o2; SEGMENT.check3 = false;
+  SEGMENT.custom3 = 31; SEGMENT.check1 = c.o1 ^ phareFlip; SEGMENT.check2 = c.o2; SEGMENT.check3 = false;
   if (change) SEGENV.call = 0;
   c.fx();
   SEGENV.call = appel;
@@ -2268,20 +2270,23 @@ static void mode_phare_dj(void) {
   PhareDJ* d = reinterpret_cast<PhareDJ*>(SEGENV.data + sizeof(PhareState));
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   uint32_t now = millis();
-  if (SEGENV.call == 0) { memset(d, 0, sizeof(PhareDJ)); d->cat = 255; }
+  if (SEGENV.call == 0) { memset(d, 0, sizeof(PhareDJ)); d->cat = 255; d->suivant = SEGMENT.check1; }
   float prox = SEGMENT.intensity / 255.0f;                 // proximite au son
   int8_t vitesse = ((int)SEGMENT.speed - 128) / 2;          // plus calme <-> plus excite
   bool silence = now - T.silenceDepuis > 3000;
   bool kick = phareKickActif();
 
-  // --- montee et drop ---
-  bool monte = T.energie > T.energieLente * 1.05f;
-  if (d->etat == 0 && !kick && !silence && T.lastKick && now - T.lastKick < 15000 && monte) { d->etat = 1; d->t = now; d->roll = 0; }
+  // --- montee et drop : quand le kick disparait apres un passage rythme, 7 fois sur 10 on part en montee ---
+  if (kick) d->decide = false;
+  if (d->etat == 0 && !kick && !silence && !d->decide && T.lastKick && now - T.lastKick < 6000 && d->catRythme >= 2) {
+    d->decide = true;
+    if (hw_random8() < 179) { d->etat = 1; d->t = now; d->roll = 0; }
+  }
   if (d->etat == 1) {
     if (T.lastKick > d->t) { d->etat = 2; d->t = now; }   // le kick revient : DROP
     else if (now - d->t > 20000 || silence) d->etat = 0;   // finalement pas de drop
   }
-  if (d->etat == 2 && now - d->t > 1600) { d->etat = 0; d->cat = 255; }
+  if (d->etat == 2 && now - d->t > 1700) { d->etat = 0; d->cat = 255; }
   float lv[PHARE_MAX];
   if (d->etat == 1) {                                       // roll qui accelere
     float e = (now - d->t) / 1000.0f;
@@ -2293,10 +2298,10 @@ static void mode_phare_dj(void) {
     lv[(k + n - 1) % n] = max(lv[(k + n - 1) % n], 1.0f - phareSmooth(f * 3.0f));
     phareShow(lv, n, 0); return;
   }
-  if (d->etat == 2) {                                       // noir puis explosion qui clignote
+  if (d->etat == 2) {                                       // noir puis les 4 clignotent ensemble a fond
     uint32_t t = now - d->t;
-    bool on = t >= 200 && ((t / 55) % 3) != 2;
-    for (unsigned i = 0; i < n; i++) lv[i] = t < 200 ? 0.0f : (on ? 1.0f : 0.15f);
+    bool on = t >= 200 && ((t - 200) / 65) % 2 == 0;
+    for (unsigned i = 0; i < n; i++) lv[i] = on ? 1.0f : 0.0f;
     phareShow(lv, n, 0); return;
   }
 
@@ -2329,21 +2334,29 @@ static void mode_phare_dj(void) {
   else {
     float score = (phareBpm() - 105.0f) / 40.0f + (T.energie / max(T.energieTres, 1.0f) - 1.0f) + vitesse / 128.0f;
     cat = score < -0.2f ? 2 : (score < 0.6f ? 3 : 4);
+    d->catRythme = cat;
   }
 
   // --- quand changer : en debut de phrase (8 mesures) quand le tempo est cale, sinon toutes les 30 s ---
-  uint32_t phraseIdx = T.beatCount / 32;
-  bool finPhrase = phareCale() ? (phraseIdx != d->phrase) : (now - d->choix > 30000);
+  uint32_t mesureIdx = T.beatCount / 4, phraseIdx = T.beatCount / 16;   // phrase = 4 mesures
+  bool cale = phareCale();
+  bool finMesure = cale ? (mesureIdx != d->mesure) : (now - d->choix > 8000);
+  bool finPhrase = cale ? (phraseIdx != d->phrase) : (now - d->choix > 15000);
   bool change = (SEGENV.call == 0) || d->cat == 255;
+  bool suivant = SEGMENT.check1 != d->suivant;              // case "Suivant" cliquee
+  if (suivant) { d->suivant = SEGMENT.check1; change = true; }
   if (cat != d->cat) {
     bool urgent = cat <= 1 || d->cat <= 1;                  // silence / break : tout de suite
-    if (urgent || finPhrase) change = true;
-    else cat = d->cat;                                      // on attend la fin de la phrase
-  } else if (finPhrase && now - d->choix > 20000) change = true;
+    if (urgent || finMesure) change = true;                 // sinon au debut de la mesure
+    else cat = d->cat;
+  } else if (finPhrase) change = true;                       // nouvel effet toutes les 4 mesures
+  if (finMesure && !change && hw_random8() < 64) phareFlip = !phareFlip;   // petite variation (sens, option)
+  if (finMesure) d->mesure = mesureIdx;
   if (finPhrase) d->phrase = phraseIdx;
   if (change) {
-    uint8_t nb = nbCat[cat], nv = hw_random8() % nb;
-    if (nb > 1 && cat == d->cat) while (nv == d->idx) nv = hw_random8() % nb;
+    uint8_t nb = nbCat[cat], nv;
+    if (suivant && cat == d->cat) nv = (d->idx + 1) % nb;    // suivant : l'effet d'apres
+    else { nv = hw_random8() % nb; if (nb > 1 && cat == d->cat) while (nv == d->idx) nv = hw_random8() % nb; }
     d->idx = nv; d->cat = cat; d->choix = now;
   }
   if (d->idx >= nbCat[d->cat]) d->idx = 0;
@@ -2352,7 +2365,7 @@ static void mode_phare_dj(void) {
   phareForceCouches = d->cat >= 2 ? (0.25f + 0.75f * prox) * (d->cat == 2 ? 0.7f : 1.0f) : 0.0f;
   phareJoue(cats[d->cat][d->idx], change, d->cat == 1 ? 0 : vitesse);
 }
-static const char _data_FX_MODE_PHARE_DJ[] PROGMEM = "12 DJ auto@Calme / excite,Proximite au son;!;;1f;sx=128,ix=170";
+static const char _data_FX_MODE_PHARE_DJ[] PROGMEM = "12 DJ auto@Calme / excite,Proximite au son,,,,Suivant;!;;1f;sx=128,ix=170";
 
 static void mode_phare_auto_anim(void) {
   static const PhareChoix liste[] = {
