@@ -1258,6 +1258,203 @@ static void mode_morsecode(void) {
 static const char _data_FX_MODE_MORSECODE[] PROGMEM = "Morse Code@Speed,,,,Color mode,Color by Word,Punctuation,EndOfMessage;;!;1;sx=192,c3=8,o1=1,o2=1";
 
 
+
+/////////////////////////////////////////////////////////////
+//  Effets "Phare" : colonne de 4 ampoules, 0 = bas, 3 = haut
+//  Reagissent au micro (usermod AudioReactive)
+/////////////////////////////////////////////////////////////
+
+#define PHARE_MAX 16
+
+struct PhareState {
+  float    level[PHARE_MAX];  // intensite de chaque ampoule, 0..1
+  float    bassAvg;           // moyenne glissante des basses
+  float    trebAvg;           // moyenne glissante des aigus
+  float    env;               // enveloppe (volume ou basses lissees)
+  float    phase;             // position de la vague
+  uint32_t lastBeat;
+  uint32_t lastTreb;
+  uint32_t lastFrame;
+  uint8_t  pos;               // ampoule courante (roll)
+  uint8_t  side;              // ampoule du haut courante (alternance)
+};
+
+// donnees du micro (ou son simule si le micro est absent)
+static um_data_t* phareAudio() {
+  um_data_t *um_data;
+  if (!UsermodManager::getUMData(&um_data, USERMOD_ID_AUDIOREACTIVE)) um_data = simulateSound(SEGMENT.soundSim);
+  return um_data;
+}
+
+// prepare l'etat, renvoie le temps ecoule depuis la derniere image (ms)
+static PhareState* phareInit(uint32_t &dt) {
+  if (!SEGENV.allocateData(sizeof(PhareState))) return nullptr;
+  PhareState* s = reinterpret_cast<PhareState*>(SEGENV.data);
+  if (SEGENV.call == 0) {
+    memset(s, 0, sizeof(PhareState));
+    s->bassAvg = 40.0f;
+    s->trebAvg = 40.0f;
+    s->lastFrame = strip.now;
+  }
+  dt = strip.now - s->lastFrame;
+  if (dt > 100) dt = 100;
+  s->lastFrame = strip.now;
+  return s;
+}
+
+// basses : canaux 0 a 2 (environ 40 a 200 Hz)
+static float phareBass(const uint8_t* fft) { return (fft[0] + fft[1] + fft[2]) / 3.0f; }
+// aigus : canaux 13 a 15 (environ 3,7 a 9 kHz : charleston, cymbales)
+static float phareTreb(const uint8_t* fft) { return (fft[13] + fft[14] + fft[15]) / 3.0f; }
+
+// detection d'un coup : le son depasse nettement sa moyenne recente
+static bool phareBeat(float val, float &avg, uint32_t &last, uint8_t sensitivity, uint16_t minGapMs) {
+  float k = 2.2f - (sensitivity / 255.0f) * 1.1f;   // sensibilite max -> seuil 1,1 x la moyenne
+  bool beat = (val > avg * k) && (val > 12.0f) && (strip.now - last > minGapMs);
+  if (beat) last = strip.now;
+  avg = avg * 0.96f + val * 0.04f;
+  if (avg < 8.0f) avg = 8.0f;
+  return beat;
+}
+
+// fait retomber toutes les ampoules ; retombeeMs = temps pour passer de 100 % a 0
+static void phareDecay(PhareState* s, unsigned n, uint32_t dt, float retombeeMs) {
+  float d = dt / retombeeMs;
+  for (unsigned i = 0; i < n; i++) {
+    s->level[i] -= d;
+    if (s->level[i] < 0.0f) s->level[i] = 0.0f;
+  }
+}
+
+// affiche les intensites, avec un fond "veilleuse" minimum
+static void phareDraw(PhareState* s, unsigned n, uint8_t veilleuse) {
+  uint32_t c = SEGCOLOR(0) ? SEGCOLOR(0) : WHITE;
+  for (unsigned i = 0; i < n; i++) {
+    int v = (int)(s->level[i] * 255.0f);
+    if (v < veilleuse) v = veilleuse;
+    if (v > 255) v = 255;
+    SEGMENT.setPixelColor(i, color_fade(c, v));
+  }
+}
+
+static float phareRetombee(uint8_t speed) { return map(speed, 0, 255, 1500, 80); }
+
+// 1. Musique bass : basses sur la moitie du bas, aigus en alternance sur la moitie du haut
+static void mode_phare_bass(void) {
+  uint32_t dt; PhareState* s = phareInit(dt);
+  if (!s) FX_FALLBACK_STATIC;
+  unsigned n = min((unsigned)SEGLEN, (unsigned)PHARE_MAX);
+  if (n < 2) FX_FALLBACK_STATIC;
+  uint8_t* fft = (uint8_t*)phareAudio()->u_data[2];
+  unsigned half = n / 2;
+
+  phareDecay(s, n, dt, phareRetombee(SEGMENT.speed));
+
+  // bas : suit l'enveloppe des basses (montee immediate)
+  float bass = phareBass(fft);
+  phareBeat(bass, s->bassAvg, s->lastBeat, SEGMENT.intensity, 120);
+  float b = (bass - s->bassAvg * 0.6f) / (255.0f - s->bassAvg * 0.6f);
+  b = constrain(b * (1.0f + SEGMENT.intensity / 128.0f), 0.0f, 1.0f);
+  for (unsigned i = 0; i < half; i++) if (b > s->level[i]) s->level[i] = b;
+
+  // haut : un flash par coup d'aigu, en alternant les ampoules
+  if (phareBeat(phareTreb(fft), s->trebAvg, s->lastTreb, SEGMENT.intensity, 90)) {
+    unsigned topCount = n - half;
+    s->side = (s->side + 1) % topCount;
+    s->level[half + s->side] = 1.0f;
+  }
+  phareDraw(s, n, SEGMENT.custom1);
+}
+static const char _data_FX_MODE_PHARE_BASS[] PROGMEM = "Musique bass@Retombee,Sensibilite,Veilleuse;!;;1f;sx=150,ix=170,c1=0";
+
+// 2. Roll basse : la lumiere monte d'une ampoule a chaque coup de basse
+static void mode_phare_roll_bass(void) {
+  uint32_t dt; PhareState* s = phareInit(dt);
+  if (!s) FX_FALLBACK_STATIC;
+  unsigned n = min((unsigned)SEGLEN, (unsigned)PHARE_MAX);
+  if (n < 2) FX_FALLBACK_STATIC;
+  uint8_t* fft = (uint8_t*)phareAudio()->u_data[2];
+
+  phareDecay(s, n, dt, phareRetombee(SEGMENT.speed));
+  if (phareBeat(phareBass(fft), s->bassAvg, s->lastBeat, SEGMENT.intensity, 150)) {
+    s->pos = (s->pos + 1) % n;
+    s->level[s->pos] = 1.0f;
+  }
+  phareDraw(s, n, SEGMENT.custom1);
+}
+static const char _data_FX_MODE_PHARE_ROLL_BASS[] PROGMEM = "Roll basse@Retombee,Sensibilite,Veilleuse;!;;1f;sx=120,ix=170,c1=30";
+
+// 3. Vague volume : vague continue du bas vers le haut, plus forte quand le son monte
+static void mode_phare_vague(void) {
+  uint32_t dt; PhareState* s = phareInit(dt);
+  if (!s) FX_FALLBACK_STATIC;
+  unsigned n = min((unsigned)SEGLEN, (unsigned)PHARE_MAX);
+  if (n < 2) FX_FALLBACK_STATIC;
+  float vol = *(float*)phareAudio()->u_data[0];   // 0..255
+
+  // enveloppe : monte vite, redescend doucement
+  float target = constrain(vol / 255.0f * (1.0f + SEGMENT.intensity / 64.0f), 0.0f, 1.0f);
+  if (target > s->env) s->env += (target - s->env) * 0.5f;
+  else                 s->env += (target - s->env) * 0.05f;
+
+  // vitesse de la vague : de 0,3 a 4 ampoules par seconde
+  float ampSec = 0.3f + SEGMENT.speed / 255.0f * 3.7f;
+  s->phase += ampSec * dt / 1000.0f;
+  while (s->phase >= n) s->phase -= n;
+
+  for (unsigned i = 0; i < n; i++) {
+    float d = fabsf((float)i - s->phase);
+    if (d > n / 2.0f) d = n - d;                   // la vague boucle du haut vers le bas
+    float w = 1.0f - d;                            // largeur : une ampoule et demie
+    if (w < 0.0f) w = 0.0f;
+    s->level[i] = w * (0.15f + 0.85f * s->env);
+  }
+  phareDraw(s, n, SEGMENT.custom1);
+}
+static const char _data_FX_MODE_PHARE_VAGUE[] PROGMEM = "Vague volume@Vitesse,Sensibilite,Veilleuse;!;;1v;sx=90,ix=128,c1=25";
+
+// 4. Flamme musicale : braise en bas, la flamme monte avec le volume et vacille en haut
+static void mode_phare_flamme(void) {
+  uint32_t dt; PhareState* s = phareInit(dt);
+  if (!s) FX_FALLBACK_STATIC;
+  unsigned n = min((unsigned)SEGLEN, (unsigned)PHARE_MAX);
+  if (n < 1) FX_FALLBACK_STATIC;
+  float vol = *(float*)phareAudio()->u_data[0];
+
+  float target = constrain(vol / 255.0f * (1.0f + SEGMENT.intensity / 64.0f), 0.0f, 1.0f);
+  float up = 0.1f + SEGMENT.speed / 255.0f * 0.6f;   // reactivite
+  if (target > s->env) s->env += (target - s->env) * up;
+  else                 s->env += (target - s->env) * up * 0.25f;
+
+  float h = 0.6f + s->env * (n - 0.6f);              // hauteur de flamme, en ampoules
+  uint8_t braise = SEGMENT.custom1;
+  for (unsigned i = 0; i < n; i++) {
+    float f = constrain(h - i, 0.0f, 1.0f);           // 1 = sous la flamme, 0 = au-dessus
+    float flicker = 1.0f - (hw_random8() / 255.0f) * (0.15f + 0.45f * (float)i / n);
+    s->level[i] = f * flicker;
+  }
+  if (s->level[0] * 255.0f < braise) s->level[0] = braise / 255.0f * (0.85f + hw_random8() / 1700.0f);
+  phareDraw(s, n, 0);
+}
+static const char _data_FX_MODE_PHARE_FLAMME[] PROGMEM = "Flamme musicale@Reactivite,Sensibilite,Braise;!;;1v;sx=128,ix=128,c1=70";
+
+// 5. Coup de frein : tout s'allume d'un coup sur la grosse caisse, puis retombe
+static void mode_phare_frein(void) {
+  uint32_t dt; PhareState* s = phareInit(dt);
+  if (!s) FX_FALLBACK_STATIC;
+  unsigned n = min((unsigned)SEGLEN, (unsigned)PHARE_MAX);
+  if (n < 1) FX_FALLBACK_STATIC;
+  uint8_t* fft = (uint8_t*)phareAudio()->u_data[2];
+
+  phareDecay(s, n, dt, phareRetombee(SEGMENT.speed));
+  if (phareBeat(phareBass(fft), s->bassAvg, s->lastBeat, SEGMENT.intensity, 150)) {
+    for (unsigned i = 0; i < n; i++) s->level[i] = 1.0f;
+  }
+  phareDraw(s, n, SEGMENT.custom1);
+}
+static const char _data_FX_MODE_PHARE_FREIN[] PROGMEM = "Coup de frein@Retombee,Sensibilite,Veilleuse;!;;1f;sx=170,ix=170,c1=0";
+
+
 /////////////////////
 //  UserMod Class  //
 /////////////////////
@@ -1276,6 +1473,13 @@ class UserFxUsermod : public Usermod {
     ////////////////////////////////////////
     //  add your effect function(s) here  //
     ////////////////////////////////////////
+
+    // Effets du phare
+    strip.addEffect(255, &mode_phare_bass, _data_FX_MODE_PHARE_BASS);
+    strip.addEffect(255, &mode_phare_roll_bass, _data_FX_MODE_PHARE_ROLL_BASS);
+    strip.addEffect(255, &mode_phare_vague, _data_FX_MODE_PHARE_VAGUE);
+    strip.addEffect(255, &mode_phare_flamme, _data_FX_MODE_PHARE_FLAMME);
+    strip.addEffect(255, &mode_phare_frein, _data_FX_MODE_PHARE_FREIN);
 
     // use id=255 for all custom user FX (the final id is assigned when adding the effect)
 
