@@ -2707,7 +2707,7 @@ class UserFxUsermod : public Usermod {
     strip.addEffect(255, &mode_phare_auto_anim, _data_FX_MODE_PHARE_AUTO_ANIM);
     strip.addEffect(255, &mode_phare_allbass, _data_FX_MODE_PHARE_ALLBASS);
     // nouveaux effets : WLED est limite a 255 effets, on prend la place d'effets natifs (masques) n° 1 a 7
-    struct { mode_ptr fx; const char* data; } neufs[] = {
+    struct { void (*fx)(); const char* data; } neufs[] = {
       {&mode_phare_gradient, _data_FX_MODE_PHARE_GRADIENT}, {&mode_phare_duos, _data_FX_MODE_PHARE_DUOS},
       {&mode_phare_batterie, _data_FX_MODE_PHARE_BATTERIE}, {&mode_phare_question, _data_FX_MODE_PHARE_QUESTION},
       {&mode_phare_ricochet, _data_FX_MODE_PHARE_RICOCHET}, {&mode_phare_scintillement, _data_FX_MODE_PHARE_SCINTILLEMENT},
