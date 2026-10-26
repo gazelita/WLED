@@ -1289,16 +1289,11 @@ struct PhareState {
   float    q;                 // libre (pic du VU-metre, energie...)
 };
 
-// seuil d'allumage : en dessous de ce pourcentage, le filament ne brille pas (reglable dans Usermods)
-static uint8_t phareSeuilAllumage = 30;
-
 // courbe filament + prechauffage : niveau percu (0..1) -> valeur envoyee a l'ampoule
-//   0 = prechauffage juste sous le seuil (invisible, l'ampoule repond plus vite)
-//   0..1 visible = du seuil d'allumage a 100 %
 static uint8_t phareOut(float level) {
   level = constrain(level, 0.0f, 1.0f);
-  float seuil = phareSeuilAllumage / 100.0f;
-  float duty = level < 0.02f ? seuil * 0.75f : seuil + (1.0f - seuil) * powf(level, 1.3f);
+  float duty = powf(level, 1.3f);              // un filament parait sombre en bas : on compense
+  if (duty < 0.02f) duty = 0.02f;              // prechauffage : jamais completement froid (invisible)
   int v = (int)(duty * 255.0f + 0.5f);
   if (gammaCorrectCol) v = gamma8inv(v);       // annule la correction gamma de WLED (faite pour les LED)
   return v;
@@ -2770,14 +2765,11 @@ class UserFxUsermod : public Usermod {
   void addToConfig(JsonObject& root) override {
     JsonObject top = root.createNestedObject(F("Phare"));
     top[F("Latence micro (ms)")] = phareLatence;
-    top[F("Seuil d'allumage (%)")] = phareSeuilAllumage;
   }
   bool readFromConfig(JsonObject& root) override {
     JsonObject top = root[F("Phare")];
     bool ok = !top.isNull();
     ok &= getJsonValue(top[F("Latence micro (ms)")], phareLatence, (uint16_t)60);
-    ok &= getJsonValue(top[F("Seuil d'allumage (%)")], phareSeuilAllumage, (uint8_t)30);
-    phareSeuilAllumage = min(phareSeuilAllumage, (uint8_t)90);
     return ok;
   }
   uint16_t getId() override { return USERMOD_ID_USER_FX; }
