@@ -24,6 +24,7 @@ jobs:
           echo "::notice::Musique bass dans le bin: $(grep -ac 'Musique bass' .pio/build/punto1/firmware.bin)"
           echo "::notice::Morse Code dans le bin: $(grep -ac 'Morse Code' .pio/build/punto1/firmware.bin)"
           echo "::notice::Spinning Wheel dans le bin: $(grep -ac 'Spinning Wheel' .pio/build/punto1/firmware.bin)"
+          grep -E "error|Error" build.log | head -15 | while IFS= read -r l; do echo "::warning::$l"; done
           echo "::notice::Lignes usermods: $(grep -i 'usermod' build.log | head -5 | tr '\n' ' | ')"
       - uses: actions/upload-artifact@v4
         with:
