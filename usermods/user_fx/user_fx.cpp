@@ -1335,34 +1335,46 @@ static float phareCycle(float nbTemps) {
   return pos / nbTemps;
 }
 
+// =====================================================================
+//  CONTEXTE DE RENDU : ce que l'image en cours doit faire, en un seul endroit
+//  chaine : ecoute -> tempo -> effet -> couches (percus) -> montee / drop -> main -> sortie
+//  le VJ le remplit avant de jouer un effet ; tout revient a zero apres chaque image
+// =====================================================================
+struct PhareRenduCtx {
+  bool  vj = false;          // l'effet est joue par le VJ
+  float vjCouches = 1.0f;    // force des percus voulue par le VJ
+  bool  reactif = false;     // l'animation suit le tempo
+  float couches = 0.0f;      // force des percus (kick / chick / hi-hats) posees par-dessus
+  bool  sansKick = false;    // pas de couche kick (1 phrase sur 10 en VJ, ou Roll)
+  bool  chickSeul = false;   // sans kick : seulement le chick en haut
+  bool  calme = false;       // VJ calme : une seule lampe marque le kick
+  float douceur = 0.0f;      // 0 = clignote (franc), 1 = veilleuse (fondus lents)
+  bool  max3 = false;        // jamais les 4 lampes a fond (reserve au drop)
+  float gain = 1.0f;         // fondu de sortie (extinction quand le son se coupe)
+};
+static PhareRenduCtx Rd;
+static void phareRenduReset() { bool vj = Rd.vj; float vc = Rd.vjCouches; Rd = PhareRenduCtx(); Rd.vj = vj; Rd.vjCouches = vc; }
 // ---- reactivite des animations ----
-static bool  phareReactif = false;        // l'animation en cours suit le tempo
-static float phareCouchesForce = 0.0f;    // force des couches kick / caisse claire / hi-hats
-static bool  phareForce = false;          // le DJ impose le mode reactif
-static float phareForceCouches = 1.0f;    // ... et la force des couches
 
 // a appeler au debut de chaque animation
 static uint8_t phareSortie[4] = {0};      // niveaux affiches (pour la page de controle)
 static float phareVol = 0;                 // volume du micro (pour la page)
+static bool phareExpo = false;             // l'effet en cours est un effet Expo (ambiance fixe, sans son)
 static bool phareOverride = false;        // Override : kick / chick / hi-hats par-dessus l'effet, meme hors VJ
 static bool phareSync = true;             // "Sync" general (page de controle) : tous les effets suivent le tempo, ou aucun
 static bool phareSurLe1 = false;          // "Sur le 1" : Suivant / Drop / changement d'effet partent au prochain temps 1
 static uint32_t phareMesureN = 0;         // compte les debuts de mesure (temps 1)
 static void phareAnim() {
-  phareReactif = phareForce || phareSync;
-  phareCouchesForce = phareForce ? phareForceCouches : (phareOverride ? 1.0f : 0.0f);   // hors VJ : seul, sauf Override
+  Rd.reactif = Rd.vj || (phareSync && !phareExpo);
+  Rd.couches = Rd.vj ? Rd.vjCouches : ((phareOverride && !phareExpo) ? 1.0f : 0.0f);   // hors VJ : seul, sauf Override
 }
 // temps "musical" : avance au rythme du morceau (1 temps = 500 ms, comme a 120 BPM)
 static uint32_t phareNow() {
-  if (!phareReactif || !phareCale()) return strip.now;
+  if (!Rd.reactif || !phareCale()) return strip.now;
   float frac = constrain((millis() - T.lastTick) / T.period, 0.0f, 0.999f);
   return (uint32_t)((T.beatCount + frac) * 500.0f);
 }
 
-static bool  phareSansKick = false;       // le DJ coupe la couche kick (environ 1 phrase sur 10)
-static bool  phareChickSeul = false;      // sans kick : seulement le chick en haut
-static bool  phareCalme = false;          // VJ calme : une seule lampe marque le kick, les autres en veilleuse
-static float phareDouceur = 0.0f;         // VJ : 0 = clignote (franc), 1 = veilleuse (fondus lents, niveaux bas)
 static uint8_t phareSens = 220;           // sensibilite generale au son (Usermods -> Phare, ou page de controle)
 // controle a la main (page punto1.local/phare)
 static volatile float   phareMainPos = -1.0f;   // fader "Main" : 0 = bas, 1 = haut, -1 = relache
@@ -1371,13 +1383,13 @@ static volatile uint8_t pharePads = 0;          // boutons lampes 1 2 3 4 (bit p
 
 // couches posees par-dessus l'effet : kick (ampoules 1-2), caisse claire (4), hi-hats (2-3)
 static void phareCouches(float* lv, unsigned n) {
-  if (phareCouchesForce <= 0.0f || n < 1) return;
+  if (Rd.couches <= 0.0f || n < 1) return;
   uint32_t now = millis();
-  float f = phareCouchesForce;
-  if (T.kickFlash && now >= T.kickFlash && !phareSansKick && !phareChickSeul) {
+  float f = Rd.couches;
+  if (T.kickFlash && now >= T.kickFlash && !Rd.sansKick && !Rd.chickSeul) {
     float e = expf(-(float)(now - T.kickFlash) / (T.period * 0.28f)) * f;
     unsigned a = 0, b = n > 1 ? 1 : 0;
-    if (phareCalme) { unsigned k = T.kickMode == 3 ? b : a; lv[k] = max(lv[k], e); return; }    // calme : 1 seule lampe, rien d'autre
+    if (Rd.calme) { unsigned k = T.kickMode == 3 ? b : a; lv[k] = max(lv[k], e); return; }    // calme : 1 seule lampe, rien d'autre
     if (T.kickMode == 0)      { lv[a] = max(lv[a], e); lv[b] = max(lv[b], e * 0.5f); }             // lead sur 1
     else if (T.kickMode == 3) { lv[b] = max(lv[b], e); lv[a] = max(lv[a], e * 0.5f); }             // lead sur 2
     else if (T.kickMode == 1) { lv[a] = max(lv[a], e); lv[b] = max(lv[b], e); }                    // double
@@ -1385,7 +1397,7 @@ static void phareCouches(float* lv, unsigned n) {
   }
   if (n >= 3 && T.lastSnare && now >= T.lastSnare)
     lv[n - 1] = max(lv[n - 1], expf(-(float)(now - T.lastSnare) / 110.0f) * f);                    // chick
-  if (n >= 4 && T.lastHat && now >= T.lastHat && !phareChickSeul) {
+  if (n >= 4 && T.lastHat && now >= T.lastHat && !Rd.chickSeul) {
     float h = 0.22f * expf(-(float)(now - T.lastHat) / 60.0f) * f;                                 // hi-hats
     lv[1] = max(lv[1], h); lv[2] = max(lv[2], h);
   }
@@ -1428,23 +1440,31 @@ struct PhareDrop {
 static PhareDrop DR;
 static volatile uint8_t phareCmd = 0;       // boutons : 1 montee, 2 drop, 3 suivant
 static bool phareSuivantDemande = false;
-static float phareGain = 1.0f;              // le DJ eteint en fondu quand le son se coupe
 static float phareGainSon() { return 0.3f * powf(10.0f, phareSens / 255.0f); }   // sensibilite : x0,3 a x3
 static float phareGateActif() { return 2.0f + (255 - phareSens) / 255.0f * 38.0f; }   // en dessous : silence
-static bool  phareMax3 = false;             // DJ : jamais les 4 lampes a fond (reserve au drop)
 
 static float phareTempsGrille() { return (float)T.beatCount + constrain((millis() - T.lastTick) / T.period, 0.0f, 0.999f); }
+// change la vitesse de la montee TOUT DE SUITE, en restant cale sur les subdivisions du temps :
+// l'ampoule en cours reste allumee, la suivante tombe sur le prochain 1/r de temps
+static void phareMonteeRate(float r) {
+  float b = phareTempsGrille();
+  float pos = DR.pos0 + (b - DR.b0) * DR.vitesse;
+  DR.pos0 = floorf(max(0.0f, pos));
+  DR.b0 = floorf(b * r) / r;
+  DR.vitesse = r;
+}
 static void phareMontee(bool manuel) {
-  if (DR.etat == 1 && manuel) { DR.mult = min(16.0f, DR.mult * 2.0f); return; }   // appui suivant = + (jusqu'a x16)
+  if (DR.etat == 1 && manuel) { DR.mult = min(16.0f, DR.mult * 2.0f); phareMonteeRate(DR.mult); return; }   // appui suivant = + (jusqu'a x16)
   float b = phareTempsGrille();
   DR.etat = 1; DR.manuel = manuel; DR.t = millis(); DR.mult = 1; DR.vitesse = 1;
-  DR.b0 = floorf(b); DR.bDebut = b; DR.pos0 = -(b - DR.b0);                  // la 1re ampoule s'allume tout de suite
+  DR.b0 = floorf(b); DR.bDebut = b; DR.pos0 = 0;                             // 1re ampoule tout de suite, la suivante sur le temps
 }
 static bool phareNoirManuel = false;          // bouton "Off" : lumieres coupees, l'ecoute continue
 // + / - pendant la montee manuelle
 static void phareMonteeVitesse(bool plus) {
   if (DR.etat != 1 || !DR.manuel) return;
   DR.mult = plus ? min(16.0f, DR.mult * 2.0f) : max(0.5f, DR.mult * 0.5f);
+  phareMonteeRate(DR.mult);
 }
 static void phareNoir(bool manuel)   { DR.etat = 2; DR.manuel = manuel; DR.t = millis(); DR.kickVu = T.kickFlash; }
 static void phareFlashs(uint8_t nb)  { DR.duo = false; DR.etat = 3; DR.t = millis(); DR.flashs = 0; DR.total = nb; DR.kickVu = T.kickFlash; DR.flashT = 0; }
@@ -1482,11 +1502,9 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
   switch (DR.etat) {
     case 1: {                                                     // MONTEE : roll de plus en plus vite
       // vitesse : double toutes les 2 mesures, et chaque appui sur Montee la double encore (max 16 par temps)
-      float b = phareTempsGrille();
-      if (floorf(b) > DR.b0) {                                    // nouveau temps : on applique la nouvelle vitesse
-        DR.pos0 += (floorf(b) - DR.b0) * DR.vitesse; DR.b0 = floorf(b);
-        if (DR.manuel) DR.vitesse = DR.mult;                      // manuel : c'est toi qui regles (+ / -)
-        else DR.vitesse = min(16.0f, (float)(1 << min((int)((b - DR.bDebut) / 8.0f), 4)));   // VJ : double toutes les 2 mesures
+      if (!DR.manuel) {                                           // VJ : double toutes les 2 mesures
+        float cible = (float)(1 << min((int)((phareTempsGrille() - DR.bDebut) / 8.0f), 4));
+        if (cible != DR.vitesse) phareMonteeRate(cible);
       }
       if (DR.manuel) { if (now - DR.t > 120000) DR.etat = 0; break; }
       if (T.lastKick > DR.t + 400 && phareKickActif()) { phareDropMaintenant(); break; }   // le kick revient : DROP
@@ -1710,7 +1728,7 @@ static void phareDecay(PhareState* s, unsigned n, uint32_t dt, float retombeeMs)
 
 // DJ : au plus 3 lampes fortes en meme temps (les 4 a fond sont reservees au drop)
 static void phareLimite3(float* lv, unsigned n) {
-  if (!phareMax3 || n < 4) return;
+  if (!Rd.max3 || n < 4) return;
   unsigned fortes = 0, faible = 0;
   for (unsigned i = 0; i < n; i++) { if (lv[i] > 0.5f) fortes++; if (lv[i] <= lv[faible]) faible = i; }
   if (fortes >= n) lv[faible] = min(lv[faible], 0.15f);
@@ -1726,13 +1744,13 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   static float filt[PHARE_MAX]; static uint32_t prec = 0;
   float dt = min(100.0f, (float)(now - prec)); prec = now;
   float lv[PHARE_MAX];
-  if (!phareForce && phareOverride) phareCouchesForce = 1.0f;   // Override : aussi sur les effets musicaux
-  for (unsigned i = 0; i < n; i++) lv[i] = max(lv0[i], veilleuse / 255.0f) * phareGain;
+  if (!Rd.vj && phareOverride && !phareExpo) Rd.couches = 1.0f;   // Override : aussi sur les effets musicaux
+  for (unsigned i = 0; i < n; i++) lv[i] = max(lv0[i], veilleuse / 255.0f) * Rd.gain;
   // douceur (VJ) / mode calme : le fond devient une veilleuse, montees et descentes progressives
-  float dou = phareCalme ? max(phareDouceur, 0.8f) : phareDouceur;
+  float dou = Rd.calme ? max(Rd.douceur, 0.8f) : Rd.douceur;
   float tau = 15.0f + dou * dou * 700.0f;
   for (unsigned i = 0; i < n; i++) {
-    float cible = lv[i] * (1.0f - 0.45f * dou) * (phareCalme ? 0.7f : 1.0f);
+    float cible = lv[i] * (1.0f - 0.45f * dou) * (Rd.calme ? 0.7f : 1.0f);
     filt[i] += (cible - filt[i]) * min(1.0f, dt / tau);
     lv[i] = filt[i];
   }
@@ -1758,7 +1776,7 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   uint8_t pads = pharePads;
   for (unsigned i = 0; i < n && i < 8; i++) if (pads & (1 << i)) lv[i] = 1.0f;
   for (unsigned i = 0; i < n; i++) { SEGMENT.setPixelColor(i, color_fade(c, phareOut(lv[i]))); if (i < 4) phareSortie[i] = (uint8_t)(constrain(lv[i], 0.0f, 1.0f) * 255); }
-  phareReactif = false; phareCouchesForce = 0.0f; phareGain = 1.0f; phareSansKick = false;
+  phareRenduReset();                                      // image suivante : contexte a zero (sauf le VJ en cours)
 }
 static void phareDraw(PhareState* s, unsigned n, uint8_t veilleuse) { phareRendu(s->level, n, veilleuse); }
 static void phareShow(const float* lv0, unsigned n, uint8_t veilleuse) { phareRendu(lv0, n, veilleuse); }
@@ -1936,7 +1954,7 @@ static void mode_phare_echo(void) {
   }
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_ECHO[] PROGMEM = "1 Soiree Echo@Vitesse,,Veilleuse,;!;;1f;sx=110,ix=128,c1=0,c2=30";
+static const char _data_FX_MODE_PHARE_ECHO[] PROGMEM = "1 Soiree Echo (ancien)@Vitesse,,Veilleuse,;!;;1f;sx=110,ix=128,c1=0,c2=30";
 
 // 31. All bass : les 4 lampes s'allument et s'eteignent ensemble sur chaque kick
 static void mode_phare_allbass(void) {
@@ -1987,7 +2005,7 @@ static void mode_phare_gradient(void) {
   phareAnim();
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   float period = map(SEGMENT.speed, 0, 255, 12000, 2000);
-  if (phareReactif && phareCale()) period = 8000.0f;            // 16 temps
+  if (Rd.reactif && phareCale()) period = 8000.0f;            // 16 temps
   float amp = 0.15f + SEGMENT.intensity / 255.0f * 0.6f;
   float plancher = 0.05f + SEGMENT.custom1 / 255.0f * 0.4f;
   float x = (phareNow() % (uint32_t)period) / period;
@@ -2007,7 +2025,7 @@ static void mode_phare_duos(void) {
   unsigned n = phareN(); if (n < 4) FX_FALLBACK_STATIC;
   static const uint8_t paires[4][2] = {{0, 1}, {1, 2}, {2, 3}, {0, 3}};
   float b;
-  if (phareReactif && phareCale()) b = phareTempsGrille();
+  if (Rd.reactif && phareCale()) b = phareTempsGrille();
   else b = strip.now / phareStepMs(SEGMENT.speed) / 2.0f;
   uint32_t pas = (uint32_t)b; float f = b - floorf(b);
   uint8_t p = SEGMENT.check1 ? (uint8_t)((pas * 2654435761u) >> 30) : pas % 4;          // ordre fixe ou au hasard
@@ -2015,7 +2033,7 @@ static void mode_phare_duos(void) {
   float lv[PHARE_MAX]; for (unsigned i = 0; i < n; i++) lv[i] = 0.0f;
   float a = 1.0f - phareSmooth((f - (1.0f - fondu)) / fondu);                           // s'eteint a la fin du temps
   lv[paires[p][0]] = a; lv[paires[p][1]] = a;
-  phareSansKick = true;
+  Rd.sansKick = true;
   phareShow(lv, n, SEGMENT.custom1);
 }
 static const char _data_FX_MODE_PHARE_DUOS[] PROGMEM = "1 Soiree Duos@Vitesse,Fondu,Veilleuse,,,Ordre au hasard,;!;;1;sx=150,ix=60,c1=0";
@@ -2064,7 +2082,7 @@ static void mode_phare_ricochet(void) {
   }
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_RICOCHET[] PROGMEM = "1 Soiree Ricochet@,,Veilleuse,,,Plus lent (croches);!;;1f;ix=60,c1=0";
+static const char _data_FX_MODE_PHARE_RICOCHET[] PROGMEM = "1 Soiree Echo@,,Veilleuse,,,Plus lent (croches);!;;1f;ix=60,c1=0";
 
 // 37. Scintillement : le kick tient la lampe 1, les hi-hats font scintiller la 3 et la 4
 static void mode_phare_scintillement(void) {
@@ -2088,12 +2106,15 @@ static void mode_phare_notes(void) {
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   um_data_t* um = phareAudio();
   float freq = *(float*)um->u_data[4], mag = *(float*)um->u_data[5], vol = *(float*)um->u_data[0];
+  uint8_t* fft = (uint8_t*)um->u_data[2];
   float seuilMag = 10.0f + (255 - phareSens) * 2.0f;
   bool valide = freq > 80.0f && freq < 4000.0f && mag > seuilMag && vol > phareGateActif();
   // s->p0 : note candidate, s->t0 : depuis quand ; s->p1 : note jouee, s->t1 : debut de la note jouee ; s->pos : sa lampe
   if (valide && fabsf(freq - s->p0) / max(s->p0, 1.0f) > 0.03f) { s->p0 = freq; s->t0 = strip.now; }
   bool tenue = valide && fabsf(freq - s->p1) / max(s->p1, 1.0f) <= 0.05f;               // la meme note continue
-  if (valide && !tenue && strip.now - s->t0 > 60) {                                       // nouvelle note
+  float med = 0; for (int b = 4; b <= 9; b++) med += fft[b]; med /= 6.0f;
+  bool attaque = med - s->q > 18.0f && strip.now - s->t1 > 70; s->q = s->q * 0.8f + med * 0.2f;   // attaque d'une note (mediums)
+  if (valide && (attaque || (!tenue && strip.now - s->t0 > 30))) {                         // nouvelle note
     uint32_t dureePrec = strip.now - s->t1;
     s->p1 = s->p0; s->t1 = strip.now;
     float demiTons = 12.0f * log2f(s->p1 / 110.0f);
@@ -2218,13 +2239,13 @@ static void mode_phare_roll(void) {
   float D = phareStepMs(SEGMENT.speed);
   float Dlast = SEGMENT.check1 ? D * 0.4f : D;
   float lv[PHARE_MAX];
-  if (phareReactif && phareCale()) {                     // une ampoule par temps, qui change pile sur le beat
+  if (Rd.reactif && phareCale()) {                     // une ampoule par temps, qui change pile sur le beat
     float b = phareTempsGrille();
     unsigned k = (unsigned)b % n; float f = b - floorf(b);
     float in = phareSmooth(f / 0.1f);
     for (unsigned i = 0; i < n; i++) lv[i] = 0.0f;
     lv[k] = in; lv[(k + n - 1) % n] = max(lv[(k + n - 1) % n], 1.0f - in);
-    phareSansKick = true;                                // pas de couche kick : le roll reste lisible
+    Rd.sansKick = true;                                // pas de couche kick : le roll reste lisible
   } else phareSequence(seq, n, n, D, Dlast, 0.1f + SEGMENT.intensity / 255.0f * 0.9f, lv);
   phareShow(lv, n, SEGMENT.custom1);
 }
@@ -2238,7 +2259,7 @@ static void mode_phare_rebond(void) {
   for (unsigned i = 0; i < n; i++) seq[len++] = i;
   for (int i = n - 2; i > 0; i--) seq[len++] = i;
   float D = phareStepMs(SEGMENT.speed);
-  if (phareReactif && phareCale()) D = 500.0f;
+  if (Rd.reactif && phareCale()) D = 500.0f;
   float lv[PHARE_MAX];
   phareSequence(seq, len, n, D, D, 0.1f + SEGMENT.intensity / 255.0f * 0.9f, lv);
   phareShow(lv, n, SEGMENT.custom1);
@@ -2250,7 +2271,7 @@ static void mode_phare_remplir(void) {
   phareAnim();
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   float D = phareStepMs(SEGMENT.speed);
-  if (phareReactif && phareCale()) D = 500.0f;
+  if (Rd.reactif && phareCale()) D = 500.0f;
   float hold = D * (1.0f + SEGMENT.intensity / 255.0f * 6.0f);
   bool vider = SEGMENT.check1;
   float tFill = D * n, tEmpty = vider ? D * n : D * 2.0f, tOff = D * 1.5f;
@@ -2327,7 +2348,7 @@ static void mode_phare_alternance(void) {
   phareAnim();
   unsigned n = phareN(); if (n < 2) FX_FALLBACK_STATIC;
   float period = map(SEGMENT.speed, 0, 255, 4000, 300);
-  if (phareReactif && phareCale()) period = 1000.0f;            // 2 temps
+  if (Rd.reactif && phareCale()) period = 1000.0f;            // 2 temps
   float s = 0.5f + 0.5f * sinf(2.0f * PI * (phareNow() % (uint32_t)period) / period);
   float sharp = 1.0f + SEGMENT.intensity / 255.0f * 6.0f;          // plus haut = transition plus franche
   float a = constrain((s - 0.5f) * sharp + 0.5f, 0.0f, 1.0f);
@@ -2348,7 +2369,7 @@ static void mode_phare_clignotant(void) {
   float pauseU = 1.0f + SEGMENT.intensity / 255.0f * 4.0f;
   float cycle = D * n + D * 1.5f + D * pauseU;
   float t = (float)(strip.now % (uint32_t)cycle);
-  if (phareReactif && phareMusique()) {   // un cycle complet = 4 temps
+  if (Rd.reactif && phareMusique()) {   // un cycle complet = 4 temps
     cycle = phareTempoMs * 4.0f; D = cycle / (n + 1.5f + pauseU);
     t = phareCycle(4) * cycle;
   }
@@ -2363,7 +2384,7 @@ static void mode_phare_respiration(void) {
   phareAnim();
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   float period = map(SEGMENT.speed, 0, 255, 9000, 1200);
-  if (phareReactif && phareCale()) period = 4000.0f;            // 8 temps
+  if (Rd.reactif && phareCale()) period = 4000.0f;            // 8 temps
   float lo = SEGMENT.intensity / 255.0f, hi = max(lo, SEGMENT.custom1 / 255.0f);
   float lv[PHARE_MAX];
   for (unsigned i = 0; i < n; i++) {
@@ -2436,7 +2457,7 @@ static void mode_phare_coeur(void) {
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   float period = 60000.0f / map(SEGMENT.speed, 0, 255, 40, 150);   // 40 a 150 battements/min
   float t = (strip.now % (uint32_t)period) / period;
-  if (phareReactif && phareMusique()) { period = phareTempoMs; t = phareCycle(1); }
+  if (Rd.reactif && phareMusique()) { period = phareTempoMs; t = phareCycle(1); }
   float second = 0.3f + SEGMENT.intensity / 255.0f * 0.7f;
   auto pulse = [](float x) { return x < 0 ? 0.0f : phareSmooth(x / 0.06f) * expf(-x * 9.0f); };   // montee et descente douces
   float b = pulse(t) + second * pulse(t - 0.26f);
@@ -2451,7 +2472,7 @@ static void mode_phare_detresse(void) {
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   float period = map(SEGMENT.speed, 0, 255, 1500, 400);
   float t = (strip.now % (uint32_t)period) / period;
-  if (phareReactif && phareMusique()) { period = phareTempoMs * 2.0f; t = phareCycle(2); }
+  if (Rd.reactif && phareMusique()) { period = phareTempoMs * 2.0f; t = phareCycle(2); }
   float ramp = 0.04f + SEGMENT.intensity / 255.0f * 0.2f;
   float b = t < 0.5f ? phareSmooth(t / ramp) : 1.0f - phareSmooth((t - 0.5f) / ramp);
   float lv[PHARE_MAX]; for (unsigned i = 0; i < n; i++) lv[i] = b;
@@ -2528,7 +2549,7 @@ static void mode_phare_marin(void) {
   phareAnim();
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   float period = map(SEGMENT.speed, 0, 255, 8000, 1500);
-  if (phareReactif && phareCale()) period = 2000.0f;            // 1 mesure
+  if (Rd.reactif && phareCale()) period = 2000.0f;            // 1 mesure
   float t = (phareNow() % (uint32_t)period) / period;
   bool deux = SEGMENT.check1;
   float w = 0.03f + SEGMENT.intensity / 255.0f * 0.1f;
@@ -2632,7 +2653,7 @@ static void phareJoue(const PhareChoix& c, bool change, int8_t vitesse) {
   SEGENV.call = appel;
   SEGMENT.speed = sx; SEGMENT.intensity = ix; SEGMENT.custom1 = c1; SEGMENT.custom2 = c2; SEGMENT.custom3 = c3;
   SEGMENT.check1 = o1; SEGMENT.check2 = o2; SEGMENT.check3 = o3;
-  phareForce = false; phareSansKick = false; phareChickSeul = false; phareMax3 = false; phareDouceur = 0.0f; phareCalme = false;
+  Rd = PhareRenduCtx();                                  // fin du VJ pour cette image : tout a zero
 }
 
 static void mode_phare_dj(void) {
@@ -2662,20 +2683,18 @@ static void mode_phare_dj(void) {
                                       {mode_phare_rebond, 80, 255, 20, 0, false, false},    {mode_phare_flamme, 128, 128, 40, 30, false, false}};
   static const PhareChoix moyen[]  = {{mode_phare_roll, 150, 120, 0, 0, false, false},    {mode_phare_rebond, 150, 120, 0, 0, false, false},
                                       {mode_phare_remplir, 150, 60, 0, 0, true, false},     {mode_phare_alternance, 120, 120, 0, 0, true, false},
-                                      {mode_phare_clignotant, 128, 80, 0, 0, false, false}, {mode_phare_echo, 120, 128, 0, 30, false, false},
-                                      {mode_phare_clignomusic, 190, 128, 0, 30, false, false}, {mode_phare_mix, 128, 128, 0, 30, false, false},
-                                      {mode_phare_artifice, 200, 150, 0, 30, false, false}, {mode_phare_duos, 150, 60, 0, 0, false, false},
-                                      {mode_phare_batterie, 150, 0, 0, 0, false, false},    {mode_phare_question, 150, 0, 0, 0, false, false},
-                                      {mode_phare_ricochet, 0, 60, 0, 0, true, false}};
+                                      {mode_phare_clignotant, 128, 80, 0, 0, false, false}, {mode_phare_artifice, 200, 150, 0, 30, false, false},
+                                      {mode_phare_duos, 150, 60, 0, 0, false, false},       {mode_phare_batterie, 150, 0, 0, 0, false, false},
+                                      {mode_phare_question, 150, 0, 0, 0, false, false},    {mode_phare_ricochet, 0, 60, 0, 0, true, false},
+                                      {mode_phare_bass, 200, 128, 0, 30, false, false}};
   static const PhareChoix excite[] = {{mode_phare_roll, 200, 60, 0, 0, true, false},      {mode_phare_rebond, 200, 60, 0, 0, false, false},
                                       {mode_phare_clignotant, 128, 60, 0, 0, false, false}, {mode_phare_remplir, 200, 30, 0, 0, true, false},
-                                      {mode_phare_alternance, 160, 255, 0, 0, false, false}, {mode_phare_roll_bass, 150, 128, 0, 30, false, false},
-                                      {mode_phare_mix, 128, 140, 0, 30, false, false},      {mode_phare_artifice, 200, 150, 0, 30, false, false},
+                                      {mode_phare_alternance, 160, 255, 0, 0, false, false}, {mode_phare_artifice, 200, 150, 0, 30, false, false},
                                       {mode_phare_duos, 200, 30, 0, 0, true, false},        {mode_phare_batterie, 200, 0, 0, 0, false, false},
                                       {mode_phare_question, 200, 0, 0, 0, false, false},    {mode_phare_ricochet, 0, 60, 0, 0, false, false},
                                       {mode_phare_scintillement, 128, 0, 0, 0, false, false}};
   static const PhareChoix* cats[]  = {veille, voix, calme, moyen, excite};
-  static const uint8_t nbCat[]     = {1, 8, 8, 13, 13};
+  static const uint8_t nbCat[]     = {1, 8, 8, 11, 11};
 
   uint8_t cat;
   if (silence) cat = 0;                                     // plus de son : on eteint
@@ -2722,14 +2741,14 @@ static void mode_phare_dj(void) {
     d->sansKick = hw_random8() < 26;                            // 1 phrase sur 10 sans la couche kick
   }
   if (d->idx >= nbCat[d->cat]) d->idx = 0;
-  phareForce = true;
-  phareForceCouches = d->cat >= 2 ? (0.25f + 0.75f * sens) * (d->cat == 2 ? 1.0f : 1.0f) : (d->cat == 1 ? 0.5f * sens + 0.2f : 0.0f);
-  phareSansKick = d->sansKick && d->cat != 2;
-  phareChickSeul = d->cat == 1;
-  phareGain = d->gain;
-  phareMax3 = true;
-  phareDouceur = douceur;
-  phareCalme = d->cat == 2;
+  Rd.vj = true;
+  Rd.vjCouches = d->cat >= 2 ? (0.25f + 0.75f * sens) * (d->cat == 2 ? 1.0f : 1.0f) : (d->cat == 1 ? 0.5f * sens + 0.2f : 0.0f);
+  Rd.sansKick = d->sansKick && d->cat != 2;
+  Rd.chickSeul = d->cat == 1;
+  Rd.gain = d->gain;
+  Rd.max3 = true;
+  Rd.douceur = douceur;
+  Rd.calme = d->cat == 2;
   phareJoue(cats[d->cat][d->idx], change, d->cat <= 1 ? 0 : vitesse);
 }
 static const char _data_FX_MODE_PHARE_DJ[] PROGMEM = "0 VJ auto@Calme / rapide,Proximite au beat,Clignote / veilleuse;!;;1f;sx=128,ix=170,c1=60";
@@ -2769,7 +2788,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .w{max-width:820px;margin:0 auto;padding:14px 14px 28px}
 .cap{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--mu)}
 /* entete */
-.top{display:flex;align-items:center;gap:14px;padding:6px 4px 14px}
+.top{display:flex;align-items:center;gap:10px;padding:6px 4px 14px}
 .logo{display:flex;align-items:center;gap:10px}
 .logo svg{width:30px;height:30px}
 .logo b{font-size:22px;letter-spacing:.28em;font-weight:700}
@@ -2830,7 +2849,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .vj .key{height:84px}
 .mtrow{grid-column:1/-1;display:grid;grid-template-columns:2fr 1fr 1fr;gap:8px}
 .vj .key.mini{height:84px}.key.mini svg{width:20px;height:20px}
-.key.on.off{background:linear-gradient(#0c0c0e,#000);color:var(--led)}
+
 .vj .key small{font:600 12px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.04em;color:var(--led);min-height:12px}
 /* metre */
 .meter{display:block}
@@ -2872,19 +2891,38 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .off{position:fixed;left:0;right:0;bottom:0;background:#2a0f0a;color:#ffb3a6;text-align:center;padding:9px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;display:none}
 @media(max-width:560px){.r2{grid-template-columns:auto auto auto 1fr}.vj .key{height:84px}
  .meter{grid-column:1/-1}.mbox{flex-direction:row;align-items:center}.dots{grid-template-rows:none;grid-template-columns:repeat(22,1fr);height:auto;flex:1}.lamps{grid-template-rows:none;grid-template-columns:repeat(4,1fr);height:36px;width:84px;padding:0}.lamps i{width:100%;height:30px}.lamps{gap:6px;height:auto;width:110px;flex:none}.vf.vs{height:96px!important;width:44px!important;flex:none}.mbox .dots{flex:1 1 auto;min-width:0;gap:3px;grid-template-columns:repeat(22,minmax(0,1fr))!important;padding:6px}.dots i{width:100%;height:auto;aspect-ratio:1;max-width:8px}.meter .cap+.mbox+.cap{display:none}}
-@media(max-width:430px){.pads{grid-template-rows:repeat(4,52px) 38px;width:52px}.vf{width:50px;height:306px}.vf.vb{width:40px}.vj .key,.vj .key.mini{height:62px;font-size:9px;letter-spacing:.1em}.mtrow{grid-template-columns:1fr 1fr}.mtrow .key:first-child{grid-column:1/-1}.mod{padding:8px}.row{gap:7px}}
+@media(max-width:430px){.logo b{font-size:18px;letter-spacing:.18em}.logo svg{width:24px}.gear,.pwr{width:40px;height:40px}.lcd{padding:6px 9px}.lcd b{font-size:19px;min-width:36px}.pads{grid-template-rows:repeat(4,52px) 38px;width:52px}.vf{width:50px;height:306px}.vf.vb{width:40px}.vj .key,.vj .key.mini{height:62px;font-size:9px;letter-spacing:.1em}.mtrow{grid-template-columns:1fr 1fr}.mtrow .key:first-child{grid-column:1/-1}.mod{padding:8px}.row{gap:7px}}
+.seg3{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;padding:4px;background:#0b0b0d;border-radius:12px;box-shadow:inset 0 2px 6px #000}
+.seg3 div{height:42px;border-radius:9px;display:flex;align-items:center;justify-content:center;gap:7px;font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--mu);cursor:pointer;touch-action:manipulation}
+.seg3 div .led{width:7px;height:7px}
+.seg3 div.on{background:linear-gradient(#34353c,#24252a);color:var(--tx);box-shadow:inset 0 1px 0 #4a4b52,0 2px 4px #0008}
+.seg3 div.on .led{background:var(--led);box-shadow:var(--glow) var(--led)}
+.modes{margin-bottom:10px}.modes div{height:48px;font-size:12px}
+.mod.vide{display:none!important}
+.grise{opacity:.3;pointer-events:none;filter:grayscale(1)}
+.gear,.pwr{flex:none}
+.gear{width:46px;height:46px;border-radius:50%;background:radial-gradient(circle at 50% 35%,#3a3b41,#18191c);border:1px solid #3a3b42;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px #000,inset 0 1px 0 #55565d;cursor:pointer}
+.gear svg{width:20px;height:20px;stroke:#aaa;fill:none;stroke-width:1.8}
+.sheet{position:fixed;inset:0;background:#000a;display:none;align-items:flex-end;justify-content:center;z-index:9}
+.sheet.ok{display:flex}
+.sheet .box{width:100%;max-width:560px;background:var(--pan);border-radius:18px 18px 0 0;padding:16px 16px 28px;box-shadow:0 -10px 30px #000}
+.sheet .row2{display:flex;align-items:center;justify-content:space-between;gap:10px;margin:12px 0}
+.sheet .num{font:600 20px/1 ui-monospace,"SF Mono",Menlo,monospace;min-width:70px;text-align:center}
+.sheet .key{height:44px;min-width:56px;padding:0 14px;flex-direction:row}
+.ms{font:600 13px ui-monospace,"SF Mono",Menlo,monospace;color:var(--led)}
 </style></head><body><div class="w">
 <div class="top">
  <div class="logo"><svg viewBox="0 0 32 32"><g fill="none" stroke="#f2f1ee" stroke-width="1.6"><rect x="9" y="2" width="14" height="28" rx="4"/></g><g><circle cx="16" cy="8" r="2.6" fill="#ff3b30"/><circle cx="16" cy="14" r="2.6" fill="#ff3b30"/><circle cx="16" cy="20" r="2.6" fill="#ffa21a"/><circle cx="16" cy="26" r="2.6" fill="#ff3b30"/></g></svg>
   <div><b>PUNTO</b></div></div>
  <div class="lcd"><span class="led" id="dot"></span><b id="bpm">---</b><span class="cap">bpm</span></div>
+ <div class="gear" id="gear"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg></div>
  <div class="pwr on" id="pwr"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.6a8 8 0 1 0 11.4 0"/></svg></div>
 </div>
 <div class="fx"><span class="led on" style="width:6px;height:6px"></span><span id="fx">—</span></div>
+<div class="seg3 modes" id="modes"><div data-m="auto"><span class="led"></span>Auto</div><div data-m="manuel"><span class="led"></span>Manuel</div><div data-m="expo"><span class="led"></span>Expo</div></div>
 <div class="deck">
  <div class="row r1">
-  <div class="tg on" id="sync"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></svg>Sync</div>
-  <div class="tg" id="ovr"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M3 8h18M3 16h18"/><circle cx="8" cy="8" r="2"/><circle cx="16" cy="16" r="2"/></svg>Override</div>
+  <div class="seg3" id="reac" style="grid-column:1/-1"><div data-r="0"><span class="led"></span>Libre</div><div data-r="1"><span class="led"></span>Tempo</div><div data-r="2"><span class="led"></span>Tempo + percus</div></div>
  </div>
  <div class="row r2">
   <div class="mod"><div class="cap">Lampes</div>
@@ -2909,16 +2947,24 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
   </div></div>
   <div class="mod meter"><div class="cap">Son</div><div class="mbox"><div class="dots" id="dots"></div><div class="lamps" id="lamps"><i></i><i></i><i></i><i></i></div><div class="vf vb vs" id="sens"><div class="fill"></div><div class="k"></div></div></div><div class="cap" style="margin-top:8px;text-align:right">Sensib.</div></div>
  </div>
- <div class="mod hs" id="fadersVJ" style="display:none">
-  <div class="h vjo" id="h_sx"><div class="t"><span>Calme</span><b>Énergie</b><span>Rapide</span></div><div class="hf" data-k="sx"><div class="f"></div><div class="k"></div></div></div>
-  <div class="h vjo" id="h_c1"><div class="t"><span>Clignote</span><b>Douceur</b><span>Veilleuse</span></div><div class="hf" data-k="c1"><div class="f"></div><div class="k"></div></div></div>
-  <div class="h vjo" id="h_ix"><div class="t"><span>Libre</span><b>Proximité au beat</b><span>Collé</span></div><div class="hf" data-k="ix"><div class="f"></div><div class="k"></div></div></div>
+ <div class="mod hs vueAuto" id="fadersVJ" style="margin-top:10px">
+  <div class="h" id="h_sx"><div class="t"><span>Calme</span><b>Énergie</b><span>Rapide</span></div><div class="hf" data-k="sx"><div class="f"></div><div class="k"></div></div></div>
+  <div class="h" id="h_c1"><div class="t"><span>Clignote</span><b>Douceur</b><span>Veilleuse</span></div><div class="hf" data-k="c1"><div class="f"></div><div class="k"></div></div></div>
+  <div class="h" id="h_ix"><div class="t"><span>Libre</span><b>Proximité au beat</b><span>Collé</span></div><div class="hf" data-k="ix"><div class="f"></div><div class="k"></div></div></div>
  </div>
 </div>
-<div class="mod sec" style="margin-top:12px" id="regl" style="display:none"><div class="cap" id="reglt">Réglages</div><div class="hs" id="reglh"></div><div class="tgs" id="reglo"></div></div>
-<div class="mod sec"><div class="cap">Soirée</div><div class="tiles" id="tSoiree"></div></div>
-<div class="mod sec"><div class="cap">Expo</div><div class="tiles" id="tExpo"></div></div>
-<div class="mod sec"><div class="cap">Firmware</div><div class="maj"><span id="ver" class="cap" style="color:var(--alu2)">Version …</span><div class="key" id="bmaj"><span class="led"></span>Vérifier</div></div><div class="prog" id="barre" style="display:none"><div></div></div><div class="msg" id="majmsg"></div></div>
+<div class="mod sec vueManuel vueExpo" style="margin-top:12px" id="regl"><div class="cap" id="reglt">Réglages</div><div class="hs" id="reglh"></div><div class="tgs" id="reglo"></div></div>
+<div class="mod sec vueManuel"><div class="cap">Effets soirée</div><div class="tiles" id="tSoiree"></div></div>
+<div class="mod sec vueExpo"><div class="cap">Ambiances expo</div><div class="tiles" id="tExpo"></div></div>
+<div class="sheet" id="sheet"><div class="box">
+ <div class="cap">Réglages du phare</div>
+ <div class="row2"><span>Latence micro</span><div style="display:flex;align-items:center;gap:8px"><div class="key" id="latm">−</div><span class="num" id="lat">60</span><div class="key" id="latp">+</div></div></div>
+ <div class="row2"><span>Test réseau <span class="ms" id="rtt"></span></span><div class="key" id="bping">Mesurer</div></div>
+ <div class="row2"><span>Flash test (toutes les lampes)</span><div class="key" id="bflash">Flash</div></div>
+ <div class="cap" style="margin-top:18px">Firmware</div>
+ <div class="maj" style="margin-top:8px"><span id="ver" class="cap" style="color:var(--alu2)">Version …</span><div class="key" id="bmaj"><span class="led"></span>Vérifier</div></div><div class="prog" id="barre" style="display:none"><div></div></div><div class="msg" id="majmsg"></div>
+ <div class="key" id="fermer" style="margin-top:18px;height:46px">Fermer</div>
+</div></div>
 </div><div class="off" id="off">Connexion au phare…</div>
 <script>
 var vjId=-2;
@@ -2938,6 +2984,7 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
  ws.onopen=function(){$('off').style.display='none'};
  ws.onclose=function(){$('off').style.display='block';setTimeout(conn,1200)};
  ws.onmessage=function(e){try{var d=JSON.parse(e.data)}catch(x){return}
+  if(d.z){$('rtt').textContent=(Date.now()-pingT)+' ms';return}
   $('bpm').textContent=d.b?d.b:'---';$('bpm').classList.toggle('old',!d.bc);
   if(d.k){var t=$('dot');t.classList.add('on');setTimeout(function(){t.classList.remove('on')},90)}
   if(d.fx!==undefined)$('fx').textContent=propre(d.fx)+(d.vn?'  ›  '+propre(d.vn):'');
@@ -2945,11 +2992,9 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
   if(d.lv!==undefined)vu(d.lv);
   if(d.l)lamps(d.l);
   if(d.on!==undefined)$('pwr').classList.toggle('on',!!d.on);
-  var vjOn=!!d.vj;['sx','c1','ix'].forEach(function(k){$('h_'+k).classList.toggle('ok',vjOn)});$('fadersVJ').style.display=vjOn?'':'none';
   ['sx','c1','ix'].forEach(function(k){if(d[k]!==undefined&&!drag[k])setH(k,d[k])});
   if(d.br!==undefined&&!drag.br)vLum.set(d.br);
   if(d.se!==undefined&&!drag.se)vSens.set(d.se);
-  if(d.vj&&d.fm!==undefined)vjId=d.fm;
   ['sx','ix','c1','c2','c3','o'].forEach(function(k){if(d[k]!==undefined)regVals[k]=d[k]});
   if(d.fm!==undefined&&armFx<0&&d.fm!=cur){cur=d.fm;marqueTuile()}
   if(d.fm!==undefined&&armFx<0)chargeReglages(d.fm);majReglages();
@@ -2958,8 +3003,10 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
   if(d.nm!==undefined)offEtat(!!d.nm);
   $('bdr').classList.toggle('on',d.dr==2);$('bdr').classList.toggle('arm',d.dr==1);
   $('bsv').classList.toggle('arm',!!d.pa);
-  if(d.sy!==undefined)$('sync').classList.toggle('on',!!d.sy);
-  if(d.ov!==undefined)$('ovr').classList.toggle('on',!!d.ov);
+  if(d.rt!==undefined)reacEtat(d.rt);
+  if(d.lat!==undefined&&!latDrag)$('lat').textContent=d.lat;
+  modeReel=d.vj?'auto':(d.ex?'expo':'manuel');if(!modeForce||Date.now()-modeForce>1500){modeForce=0;vue(modeReel)}
+  griser(d);
   if(d.v!==undefined){$('ver').textContent='Version #'+d.v;if(verLoc!==d.v){verLoc=d.v;afficheMaj()}}
  }}
 conn();
@@ -2974,8 +3021,35 @@ document.querySelectorAll('.pad').forEach(function(p){
  function up(){if(!hold){pads&=~bit;showPads();snd('p'+pads)}}
  p.addEventListener('pointerup',up);p.addEventListener('pointercancel',up)});
 $('hold').addEventListener('pointerdown',function(e){e.preventDefault();hold=!hold;this.classList.toggle('on',hold);if(!hold){pads=0;showPads();snd('p0')}});
-$('sync').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('y'+(on?1:0))});
-$('ovr').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('v'+(on?1:0))});
+// reactivite : Libre / Tempo / Tempo + percus
+function reacEtat(r){document.querySelectorAll('#reac div').forEach(function(x){x.classList.toggle('on',x.dataset.r==r)})}
+document.querySelectorAll('#reac div').forEach(function(x){x.addEventListener('click',function(){reacEtat(x.dataset.r);snd('r'+x.dataset.r)})});
+// modes : Auto / Manuel / Expo (chaque mode n'affiche que ses commandes)
+var modeReel='manuel',modeVue='',modeForce=0,dernier={manuel:-1,expo:-1},tuiles={};
+try{dernier=JSON.parse(localStorage.getItem('punto_dernier'))||dernier}catch(x){}
+function vue(m){if(m==modeVue)return;modeVue=m;document.querySelectorAll('#modes div').forEach(function(x){x.classList.toggle('on',x.dataset.m==m)});
+ document.querySelectorAll('.vueAuto,.vueManuel,.vueExpo').forEach(function(el){el.style.display=el.classList.contains('vue'+m[0].toUpperCase()+m.slice(1))?'':'none'})}
+document.querySelectorAll('#modes div').forEach(function(x){x.addEventListener('click',function(){var m=x.dataset.m;modeForce=Date.now();vue(m);
+ if(m=='auto'&&vjId>=0)lance(vjId);
+ else if(m!='auto'&&modeReel!=m){var f=dernier[m];if(!(f>=0)){var l=$(m=='expo'?'tExpo':'tSoiree').firstChild;f=l?+l.dataset.fx:-1}if(f>=0)lance(f)}})});
+function lance(fx){snd('f'+fx);cur=fx;armFx=-1;marqueTuile();chargeReglages(fx);
+ var t=tuiles[fx];if(t&&t.m!='auto'){dernier[t.m]=fx;try{localStorage.setItem('punto_dernier',JSON.stringify(dernier))}catch(x){}}}
+// griser ce qui ne sert pas
+function gr(el,g){if(el)el.classList.toggle('grise',!!g)}
+function griser(d){var mt=d.mt>0;
+ gr($('reac'),modeVue!='manuel');
+ document.querySelectorAll('.mini').forEach(function(b){gr(b,!mt)});
+ gr($('bsv'),!d.vj);
+ var h0=document.querySelector('#reglh .h');if(h0)gr(h0,!!d.sg)}
+// engrenage
+$('gear').addEventListener('click',function(){$('sheet').classList.add('ok')});
+$('fermer').addEventListener('click',function(){$('sheet').classList.remove('ok')});
+$('sheet').addEventListener('click',function(e){if(e.target==this)this.classList.remove('ok')});
+var latDrag=0,pingT=0;
+function latPas(d){var v=Math.max(0,Math.min(300,(+$('lat').textContent||0)+d));$('lat').textContent=v;latDrag=Date.now();setTimeout(function(){latDrag=0},1500);snd('l'+v)}
+$('latm').addEventListener('click',function(){latPas(-10)});$('latp').addEventListener('click',function(){latPas(10)});
+$('bping').addEventListener('click',function(){pingT=Date.now();$('rtt').textContent='…';snd('z')});
+$('bflash').addEventListener('click',function(){snd('x')});
 // fader main
 (function(){var el=$('main'),k=el.querySelector('.k'),on=false,v=0;
  for(var i=1;i<10;i++){var t=document.createElement('div');t.className='tick';t.style.top=(i*10)+'%';el.insertBefore(t,k)}
@@ -2997,7 +3071,6 @@ document.querySelectorAll('.vj .key').forEach(function(b){b.addEventListener('po
  if(c=='6'){var o=!b.classList.contains('on');offEtat(o);if(o)monteeStop()}
  if(c=='2'){b.classList.add('on');offEtat(false);monteeStop()}
  if(c=='3')monteeStop();
- if(c=='3'&&!direct)b.classList.add('arm');
  if(c=='t'){b.classList.add('on');setTimeout(function(){b.classList.remove('on')},120)}})});
 // faders horizontaux
 function setH(k,v){var el=document.querySelector('.hf[data-k="'+k+'"]');if(!el)return;var w=el.clientWidth-36,p=v/255;el.querySelector('.f').style.width=(4+p*w)+'px';el.querySelector('.k').style.left=(18+p*w)+'px'}
@@ -3023,11 +3096,12 @@ var vLum=vfInit(document.querySelector('.vb[data-k="br"]'),'br',1),vSens=vfInit(
 function marqueTuile(){document.querySelectorAll('.tile').forEach(function(t){t.classList.toggle('cur',t.dataset.fx==cur);t.classList.toggle('arm',t.dataset.fx==armFx);t.classList.toggle('sub',t.dataset.fx==vfx&&t.dataset.fx!=cur)})}
 fetch('/presets.json').then(function(r){return r.json()}).then(function(p){
  Object.keys(p).map(Number).filter(function(i){return i>0&&p[i]&&p[i].n&&p[i].seg}).sort(function(a,b){return p[a].n.localeCompare(p[b].n)}).forEach(function(i){
-  var fx=p[i].seg[0].fx,n=p[i].n,expo=/^\d+\s+Expo\s/.test(n);
+  var fx=p[i].seg[0].fx,n=p[i].n,expo=/^\d+\s+Expo\s/.test(n),vjt=/^0\s/.test(n);
+  tuiles[fx]={m:vjt?'auto':(expo?'expo':'manuel')};if(vjt){vjId=fx;return}
   var d=document.createElement('div');d.className='tile';d.dataset.fx=fx;
   d.innerHTML='<span class="led"></span>';d.appendChild(document.createTextNode(/^0\s/.test(n)?'VJ auto':propre(n)));
   var tx=0,ty=0;d.addEventListener('pointerdown',function(e){tx=e.clientX;ty=e.clientY});
-  d.addEventListener('pointerup',function(e){if(Math.abs(e.clientX-tx)>8||Math.abs(e.clientY-ty)>8)return;press(d);snd('f'+fx);cur=fx;armFx=-1;marqueTuile();chargeReglages(fx)});
+  d.addEventListener('pointerup',function(e){if(Math.abs(e.clientX-tx)>8||Math.abs(e.clientY-ty)>8)return;press(d);modeForce=Date.now();lance(fx)});
   $(expo?'tExpo':'tSoiree').appendChild(d)});marqueTuile()}).catch(function(){});
 // reglages de l'effet en cours (noms tires de l'effet)
 var fxdata=null,reglFx=-1,regVals={};
@@ -3035,14 +3109,14 @@ fetch('/json/fxdata').then(function(r){return r.json()}).then(function(a){fxdata
 var CLES=['s','i','1','2','3'],KV=['sx','ix','c1','c2','c3'];
 function chargeReglages(fx){if(!fxdata||fx==reglFx)return;reglFx=fx;var md=fxdata[fx]||'',box=$('regl'),h=$('reglh'),o=$('reglo');h.innerHTML='';o.innerHTML='';
  var lab=(md.split(';')[0]||'').split(','),n=0;
- if(fx==vjId){box.style.display='none';return}
+ if(fx==vjId){box.classList.add('vide');return}
  for(var i=0;i<5;i++){var L=lab[i];if(!L)continue;if(L=='!')L=['Vitesse','Intensité','Réglage 1','Réglage 2','Réglage 3'][i];n++;
   var w=document.createElement('div');w.className='h';w.innerHTML='<div class="t"><span></span><b>'+L+'</b><span></span></div><div class="hf" data-k="r'+i+'"><div class="f"></div><div class="k"></div></div>';h.appendChild(w);
   (function(i){var el=w.querySelector('.hf');hfInit(el,'r'+i,function(v){thr('r'+i,'k'+CLES[i]+v)});if(regVals[KV[i]]!==undefined)setH('r'+i,regVals[KV[i]])})(i)}
  for(var j=0;j<3;j++){var L2=lab[5+j];if(!L2)continue;n++;
   var t=document.createElement('div');t.className='tg';t.dataset.o=j;t.innerHTML='<span class="led"></span>'+L2;o.appendChild(t);
   (function(t,j){t.addEventListener('pointerdown',function(e){e.preventDefault();var on=!t.classList.contains('on');t.classList.toggle('on',on);snd('k'+'abc'[j]+(on?1:0))})})(t,j)}
- box.style.display=n?'':'none';setTimeout(majReglages,50)}
+ box.classList.toggle('vide',!n);setTimeout(majReglages,50)}
 function majReglages(){for(var i=0;i<5;i++)if(regVals[KV[i]]!==undefined&&!drag['r'+i])setH('r'+i,regVals[KV[i]]);
  $('reglo').querySelectorAll('.tg').forEach(function(t){t.classList.toggle('on',!!((regVals.o||0)>>t.dataset.o&1))})}
 // mise a jour du firmware : le navigateur telecharge la derniere version sur GitHub et l'envoie au phare
@@ -3085,6 +3159,7 @@ static float phareBpmVu = 0;
 static volatile int16_t phareSetSx = -1, phareSetIx = -1, phareSetC1 = -1, phareSetBri = -1, phareSetSens = -1;
 static uint32_t phareSensChange = 0;
 static volatile int8_t phareSetOn = -1;
+static volatile uint32_t phareFlashTest = 0;
 static volatile int16_t phareSetK[8] = {-1, -1, -1, -1, -1, -1, -1, -1};   // reglages de l'effet : sx ix c1 c2 c3 o1 o2 o3
 // memoire des reglages de chaque effet (enregistree dans le phare : /phare_fx.bin)
 static uint8_t phareMemo[256][6]; static bool phareMemoOk[256];
@@ -3126,6 +3201,10 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
     }
     case 'y': phareSync = m[1] == '1'; phareSensChange = millis(); break;               // Sync general
     case 'v': phareOverride = m[1] == '1'; phareSensChange = millis(); break;          // Override
+    case 'r': { int r = atoi(m + 1); phareSync = r >= 1; phareOverride = r >= 2; phareSensChange = millis(); break; }   // Libre / Tempo / Tempo + percus
+    case 'z': if (client) client->text(F("{\"z\":1}")); break;                        // test de latence (aller-retour)
+    case 'l': phareLatence = constrain(atoi(m + 1), 0, 300); phareSensChange = millis(); break;   // latence micro
+    case 'x': pharePads = 15; phareFlashTest = millis(); break;                          // flash test
     case 'f': phareSetFx = constrain(atoi(m + 1), 0, 254); phareFxMesure = phareMesureN; break;   // changer d'effet
     case 's':
       if (m[1] == 'x') phareSetSx = constrain(atoi(m + 2), 0, 255);
@@ -3201,7 +3280,7 @@ class UserFxUsermod : public Usermod {
       if (libre) { strip.getModeDataSrc()[1 + i] = libre; phareAjoute(neufs[i].fx, neufs[i].data, 1 + i); }
       else phareAjoute(neufs[i].fx, neufs[i].data);
     }
-    static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_ROLL_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_MIX, _data_FX_MODE_PHARE_VUMETRE, _data_FX_MODE_PHARE_ECHO, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_ALLBASS, _data_FX_MODE_PHARE_GRADIENT, _data_FX_MODE_PHARE_DUOS, _data_FX_MODE_PHARE_BATTERIE, _data_FX_MODE_PHARE_QUESTION, _data_FX_MODE_PHARE_RICOCHET, _data_FX_MODE_PHARE_SCINTILLEMENT, _data_FX_MODE_PHARE_NOTES};
+    static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_ALLBASS, _data_FX_MODE_PHARE_GRADIENT, _data_FX_MODE_PHARE_DUOS, _data_FX_MODE_PHARE_BATTERIE, _data_FX_MODE_PHARE_QUESTION, _data_FX_MODE_PHARE_RICOCHET, _data_FX_MODE_PHARE_SCINTILLEMENT, _data_FX_MODE_PHARE_NOTES};
     phareMasquerNatifs(nos, sizeof(nos) / sizeof(nos[0]));
 
     // use id=255 for all custom user FX (the final id is assigned when adding the effect)
@@ -3272,6 +3351,9 @@ class UserFxUsermod : public Usermod {
       }
       (void)vj;
     }
+    if (phareFlashTest && millis() - phareFlashTest > 150) { phareFlashTest = 0; pharePads = 0; }
+    // effet Expo (ambiance fixe) : jamais calé sur le son
+    { const char* d = strip.getModeData(seg.mode); phareExpo = strncmp_P("2 Expo", d, 6) == 0; }
     // reglages de l'effet envoyes par la page
     for (int i = 0; i < 8; i++) if (phareSetK[i] >= 0) {
       uint8_t v = (uint8_t)phareSetK[i]; phareSetK[i] = -1;
@@ -3299,13 +3381,17 @@ class UserFxUsermod : public Usermod {
       };
       char nom[40]; nomDe(seg.mode, nom, sizeof(nom));
       int vf = vj ? phareIdDe(phareFxJoue) : -1;
+      // la vitesse de l'effet est imposee par le tempo (curseur grise sur la page)
+      static void (*const caleTempo[])() = {mode_phare_roll, mode_phare_rebond, mode_phare_remplir, mode_phare_alternance, mode_phare_clignotant, mode_phare_duos};
+      bool sg = false;
+      if (phareSync && !phareExpo && phareCale()) for (auto f : caleTempo) if (phareIdDe(f) == seg.mode) sg = true;
       char vn[40] = ""; if (vf >= 0) nomDe((uint8_t)vf, vn, sizeof(vn));
       char buf[460];
-      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d,\"bc\":%d,\"vf\":%d,\"vn\":\"%s\",\"c2\":%d,\"c3\":%d,\"o\":%d,\"nm\":%d,\"ov\":%d}",
+      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d,\"bc\":%d,\"vf\":%d,\"vn\":\"%s\",\"c2\":%d,\"c3\":%d,\"o\":%d,\"nm\":%d,\"ov\":%d,\"ex\":%d,\"sg\":%d,\"rt\":%d,\"lat\":%d}",
                (int)(phareBpmVu + 0.5f), T.kickFlash != kickVu ? 1 : 0, vj ? 1 : 0, nom,
                seg.speed, seg.intensity, seg.custom1, phareSens, bri, seg.mode,
                DR.etat == 1 ? (int)(DR.vitesse * 2) : 0, DR.etat == 2 ? 1 : (DR.etat == 3 ? 2 : 0), phareSync ? 1 : 0, phareSurLe1 ? 1 : 0, PHARE_BUILD, bri > 0 ? 1 : 0, (int)constrain(phareVol, 0.0f, 255.0f),
-               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0, phareCale() ? 1 : 0, vf, vn, seg.custom2, seg.custom3 << 3, seg.check1 | (seg.check2 << 1) | (seg.check3 << 2), phareNoirManuel ? 1 : 0, phareOverride ? 1 : 0);
+               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0, phareCale() ? 1 : 0, vf, vn, seg.custom2, seg.custom3 << 3, seg.check1 | (seg.check2 << 1) | (seg.check3 << 2), phareNoirManuel ? 1 : 0, phareOverride ? 1 : 0, phareExpo ? 1 : 0, sg ? 1 : 0, phareSync ? (phareOverride ? 2 : 1) : 0, phareLatence);
       kickVu = T.kickFlash;
       phareWs.textAll(buf);
     }
