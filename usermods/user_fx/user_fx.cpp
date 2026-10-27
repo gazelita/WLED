@@ -1354,6 +1354,7 @@ struct PhareRenduCtx {
   float gain = 1.0f;         // fondu de sortie (extinction quand le son se coupe)
   bool  sansChick = false;   // pas de chick (formation "kick seul")
   bool  sansHats = false;    // pas de hi-hats
+  float melodie = 0.0f;      // Full auto : une lampe suit la melodie par-dessus l'effet
 };
 // orchestration du VJ, choisie a chaque phrase (8 mesures)
 struct PhareOrch {
@@ -1367,6 +1368,19 @@ struct PhareOrch {
   float   niveau = 1.0f;     // contraste couplet / refrain (0,4 a 1)
 };
 static PhareOrch O;
+static bool phareFullAuto = false;           // Full auto : le VJ lit la structure du morceau et compose plus librement
+// suivi de la melodie : hauteur (contour), attaques, accords, presence
+struct PhareMelodie {
+  float    pos = 1.5f;          // position sur la colonne (0 = lampe 1 ... 3 = lampe 4), suit le contour de la melodie
+  float    centrePrec = 0;      // hauteur de la note precedente (centre des bandes)
+  float    medLent = 10, medMoy = 10;
+  uint32_t attaque = 0, attaquePrec = 0;
+  uint8_t  accord = 1;          // notes entendues ensemble (1 a 3)
+  float    presence = 0;        // 0..1 : une melodie se joue en ce moment
+  float    nbRecent = 0;        // attaques recentes (moyenne glissante)
+  bool     tenue = false;       // note tenue (pas d'attaque mais du son)
+};
+static PhareMelodie M;
 static PhareRenduCtx Rd;
 static void phareRenduReset() { bool vj = Rd.vj; float vc = Rd.vjCouches; Rd = PhareRenduCtx(); Rd.vj = vj; Rd.vjCouches = vc; }
 // ---- reactivite des animations ----
@@ -1426,7 +1440,13 @@ static void phareCouches(float* lv, unsigned n) {
   }
   if (n >= 3 && T.lastSnare && now >= T.lastSnare && !Rd.sansChick)
     lv[n - 1] = max(lv[n - 1], expf(-(float)(now - T.lastSnare) / 110.0f) * f);                    // chick
-  if (n >= 4 && T.lastHat && now >= T.lastHat && !Rd.chickSeul && !Rd.sansHats) {
+  if (Rd.melodie > 0.0f && M.presence > 0.35f && M.attaque) {                                  // la melodie joue par-dessus
+    unsigned k = min((unsigned)(M.pos + 0.5f), n - 1);
+    float e = expf(-(float)(now - M.attaque) / (M.tenue ? 600.0f : 180.0f)) * Rd.melodie * 0.85f;
+    lv[k] = max(lv[k], e);
+    if (M.accord >= 2 && k + 1 < n) lv[k + 1] = max(lv[k + 1], e * 0.6f);
+  }
+  if (n >= 4 && T.lastHat && now >= T.lastHat && !Rd.chickSeul && !Rd.sansHats && Rd.melodie <= 0.0f) {
     float h = 0.22f * expf(-(float)(now - T.lastHat) / 60.0f) * f;                                 // hi-hats
     lv[1] = max(lv[1], h); lv[2] = max(lv[2], h);
   }
@@ -1713,6 +1733,31 @@ static void phareLoop() {
   }
   if (!phareKickActif()) T.conf = max(0.0f, T.conf - 0.0005f);
   phareTempoMs = T.period; phareTempoLast = T.lastTick;
+  // --- melodie : bandes 3 a 13 (medium / aigu), hors basse et cymbales
+  {
+    float g = phareGainSon(), v[16], med = 0, s1 = 0, s2 = 0, mx = 0;
+    for (int b = 3; b <= 13; b++) { v[b] = fft[b] * g; med += v[b]; s1 += b * v[b] * v[b]; s2 += v[b] * v[b]; mx = max(mx, v[b]); }
+    med /= 11.0f;
+    float centre = s2 > 1 ? s1 / s2 : M.centrePrec;
+    M.medMoy = M.medMoy * 0.996f + med * 0.004f;
+    bool fort = med > max(6.0f, M.medMoy * 0.5f) && vol > phareGateActif() * 0.6f;
+    bool attaque = fort && now - M.attaque > 90 && (med - M.medLent > max(6.0f, M.medLent * 0.22f) || (fabsf(centre - M.centrePrec) > 0.7f && now - M.attaque > 160));
+    M.medLent = M.medLent * 0.85f + med * 0.15f;
+    if (attaque) {
+      float d = centre - M.centrePrec;                       // la melodie monte ou descend ?
+      float pas = fabsf(d) > 2.0f ? 2.0f : (fabsf(d) > 0.4f ? 1.0f : 0.0f);
+      M.pos = constrain(M.pos + (d > 0 ? pas : -pas), 0.0f, 3.0f);
+      M.centrePrec = centre; M.attaquePrec = M.attaque; M.attaque = now;
+      uint8_t pics = 0; for (int b = 4; b <= 12; b++) if (v[b] > mx * 0.6f && v[b] >= v[b - 1] && v[b] >= v[b + 1]) pics++;
+      M.accord = constrain(pics, 1, 3);
+      M.nbRecent += 1.0f;
+    }
+    M.nbRecent *= powf(0.5f, dtLoop / 2000.0f);              // ~ attaques sur les 3 dernieres secondes
+    M.tenue = fort && now - M.attaque > 350;
+    float cible = constrain(M.nbRecent / 4.0f, 0.0f, 1.0f) * (fort ? 1.0f : 0.3f);
+    if (M.tenue && fort) cible = max(cible, 0.5f);
+    M.presence += (cible - M.presence) * min(1.0f, dtLoop / 800.0f);
+  }
   phareDropLoop(now, dtLoop, vol);
 }
 
@@ -2201,48 +2246,34 @@ static void mode_phare_scintillement(void) {
 }
 static const char _data_FX_MODE_PHARE_SCINTILLEMENT[] PROGMEM = "1 Soiree Scintillement@Tenue du kick,,Veilleuse;!;;1f;sx=128,c1=0";
 
-// 38. Notes : sans beat, la lumiere suit la melodie ; chaque nouvelle note deplace la lumiere
-//     (grave en bas, aigu en haut ; case 1 : selon la note de la gamme)
-//     notes longues et tenues -> veilleuse douce et etalee ; petites notes detachees -> eclats, un peu au hasard
+// 38. Notes : la lumiere suit la melodie (contour : monte quand la melodie monte, descend quand elle descend)
+//     accords -> 2 ou 3 lampes ; notes tenues -> lueur douce et etalee ; notes piquees -> eclats
 static void mode_phare_notes(void) {
   uint32_t dt; PhareState* s = phareInit(dt); if (!s) FX_FALLBACK_STATIC;
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
-  um_data_t* um = phareAudio();
-  float freq = *(float*)um->u_data[4], mag = *(float*)um->u_data[5], vol = *(float*)um->u_data[0];
-  uint8_t* fft = (uint8_t*)um->u_data[2];
-  float seuilMag = 10.0f + (255 - phareSens) * 2.0f;
-  bool valide = freq > 80.0f && freq < 4000.0f && mag > seuilMag && vol > phareGateActif();
-  // s->p0 : note candidate, s->t0 : depuis quand ; s->p1 : note jouee, s->t1 : debut de la note jouee ; s->pos : sa lampe
-  if (valide && fabsf(freq - s->p0) / max(s->p0, 1.0f) > 0.03f) { s->p0 = freq; s->t0 = strip.now; }
-  bool tenue = valide && fabsf(freq - s->p1) / max(s->p1, 1.0f) <= 0.05f;               // la meme note continue
-  float med = 0; for (int b = 4; b <= 9; b++) med += fft[b]; med /= 6.0f;
-  bool attaque = med - s->q > 18.0f && strip.now - s->t1 > 70; s->q = s->q * 0.8f + med * 0.2f;   // attaque d'une note (mediums)
-  if (valide && (attaque || (!tenue && strip.now - s->t0 > 30))) {                         // nouvelle note
-    uint32_t dureePrec = strip.now - s->t1;
-    s->p1 = s->p0; s->t1 = strip.now;
-    float demiTons = 12.0f * log2f(s->p1 / 110.0f);
-    int k = SEGMENT.check1 ? (((int)roundf(demiTons) % 12 + 12) % 12) * (int)n / 12
-                           : (int)constrain(demiTons / 48.0f * n, 0.0f, (float)(n - 1));   // 4 octaves sur la colonne
-    if (dureePrec < 300 && hw_random8() < 90) k += (hw_random8() & 1) ? 1 : -1;            // notes courtes : un peu de hasard
-    k = constrain(k, 0, (int)n - 1);
-    s->pos = k; s->level[k] = 1.0f;
-  }
   float ext = map(SEGMENT.speed, 0, 255, 2500, 250);
+  if (M.attaque != s->lastBeat) {                                                  // nouvelle note
+    s->lastBeat = M.attaque;
+    unsigned k = min((unsigned)(M.pos * (n - 1) / 3.0f + 0.5f), n - 1);
+    bool piquee = M.attaque - M.attaquePrec < 250;
+    s->level[k] = 1.0f;
+    if (M.accord >= 2 && k + 1 < n) s->level[k + 1] = max(s->level[k + 1], 0.7f);    // accord : la lampe voisine aussi
+    if (M.accord >= 3 && k >= 1) s->level[k - 1] = max(s->level[k - 1], 0.6f);
+    s->q = piquee ? 1.0f : 0.0f; s->pos = k;
+  }
   float plancher = SEGMENT.custom1 / 255.0f * 0.4f;
-  uint32_t duree = strip.now - s->t1;
-  bool longue = tenue && duree > 400;                                                      // note longue : mode veilleuse
   float lv[PHARE_MAX];
   for (unsigned i = 0; i < n; i++) {
     float d = fabsf((float)i - s->pos);
-    if (longue) {                                                                          // tenue : douce et etalee
-      float cible = 0.55f * max(0.0f, 1.0f - d * 0.6f);
+    if (M.tenue) {                                                                   // note tenue : douce et etalee
+      float cible = 0.55f * max(0.0f, 1.0f - d * 0.6f) * (0.5f + 0.5f * M.presence);
       s->level[i] += (cible - s->level[i]) * min(1.0f, dt / 600.0f);
-    } else s->level[i] = max(0.0f, s->level[i] - dt / ext);
-    lv[i] = plancher + (0.85f - plancher) * s->level[i];
+    } else s->level[i] = max(0.0f, s->level[i] - dt / (s->q > 0.5f ? ext * 0.4f : ext));   // piquee : eclat plus court
+    lv[i] = plancher + (0.9f - plancher) * s->level[i];
   }
   phareShow(lv, n, 0);
 }
-static const char _data_FX_MODE_PHARE_NOTES[] PROGMEM = "1 Soiree Notes@Extinction,,Veilleuse,,,Selon la gamme;!;;1f;sx=128,ix=160,c1=40";
+static const char _data_FX_MODE_PHARE_NOTES[] PROGMEM = "1 Soiree Notes@Extinction,,Veilleuse;!;;1f;sx=128,ix=160,c1=40";
 
 // ---- Memoire : chaque coup laisse une trace qui s'eteint lentement (Soiree : sur le son ; Expo : gouttes au hasard)
 static void phareMemoire(bool son) {
@@ -2862,11 +2893,12 @@ static void phareAuto(const PhareChoix* liste, unsigned nb) {
 //   pas de son -> eteint ; son sans kick -> veilleuse qui suit la voix (ou montee 7 fois sur 10) ;
 //   le beat arrive -> les 4 flashent ensemble 1 ou 2 mesures ; kick -> effets en phrases de 8 mesures,
 //   kick sur l'ampoule 1 ou 2 (90 % des phrases), chick en haut, hi-hats
-struct PhareDJ { uint8_t cat, idx; uint32_t choix, phrase, mesure; bool sansKick; float gain; uint8_t sxVu; uint32_t beatVu; bool vite; uint16_t hist[4]; uint8_t nHist; };
+struct PhareDJ { uint8_t cat, idx; uint32_t choix, phrase, mesure; bool sansKick; float gain; uint8_t sxVu; uint32_t beatVu; bool vite; uint16_t hist[4]; uint8_t nHist; uint8_t pool, arc; };
 
 static bool phareFlip = false;
 static bool phareCalmeAuto = false;
-static uint8_t phareVJCat = 255;             // categorie jouee (pour l'indicateur)          // le VJ a detecte un passage calme (energie en baisse)
+static uint8_t phareVJCat = 255;
+static uint8_t phareVJPool = 255;             // categorie jouee (pour l'indicateur)          // le VJ a detecte un passage calme (energie en baisse)
 static void (*phareFxJoue)() = nullptr;     // effet que le VJ est en train de jouer
 static void phareJoue(const PhareChoix& c, bool change, int8_t vitesse) {
   uint8_t sx = SEGMENT.speed, ix = SEGMENT.intensity, c1 = SEGMENT.custom1, c2 = SEGMENT.custom2, c3 = SEGMENT.custom3;
@@ -2887,7 +2919,7 @@ static void mode_phare_dj(void) {
   PhareDJ* d = reinterpret_cast<PhareDJ*>(SEGENV.data + sizeof(PhareState));
   unsigned n = phareN(); if (n < 1) FX_FALLBACK_STATIC;
   uint32_t now = millis();
-  if (SEGENV.call == 0) { memset(d, 0, sizeof(PhareDJ)); d->cat = 255; d->gain = 1.0f; }
+  if (SEGENV.call == 0) { memset(d, 0, sizeof(PhareDJ)); d->cat = 255; d->pool = 255; d->gain = 1.0f; }
   float sens = SEGMENT.intensity / 255.0f;                  // proximite au beat : force des couches kick / chick / hi-hats
   bool silence = now - T.sonDepuis > 1500;
   // passage calme : l'energie baisse nettement par rapport aux 12 dernieres secondes
@@ -2941,8 +2973,20 @@ static void mode_phare_dj(void) {
                                       {mode_phare_question, 200, 0, 0, 0, false, false},    {mode_phare_ricochet, 0, 60, 0, 0, false, false},
                                       {mode_phare_scintillement, 128, 0, 0, 0, false, false}, {mode_phare_memoire, 170, 0, 0, 0, false, false},
                                       {mode_phare_kickbass, 200, 200, 0, 0, false, false},  {mode_phare_kickbass, 200, 120, 0, 0, false, false}};
-  static const PhareChoix* cats[]  = {veille, voix, calme, moyen, excite};
-  static const uint8_t nbCat[]     = {1, 8, 10, 24, 22};
+  // Full auto : breakdown melodique (Notes en vedette, ~60 %) et pic (toute la palette, flashs pleins)
+  static const PhareChoix melo[]   = {{mode_phare_notes, 128, 160, 30, 0, false, false},   {mode_phare_notes, 100, 160, 20, 0, false, false},
+                                      {mode_phare_notes, 150, 160, 40, 0, false, false},    {mode_phare_notes, 128, 160, 10, 0, false, false},
+                                      {mode_phare_notes, 80, 160, 30, 0, false, false},     {mode_phare_notes, 128, 160, 50, 0, false, false},
+                                      {mode_phare_veilleuse, 0, 0, 110, 0, false, false},   {mode_phare_gradient, 40, 140, 30, 0, false, false},
+                                      {mode_phare_respimusic, 60, 128, 0, 30, false, false}, {mode_phare_pendule, 40, 60, 20, 0, false, false}};
+  static const PhareChoix pic[]    = {{mode_phare_sequenceur, 180, 0, 0, 0, false, false}, {mode_phare_sequenceur, 180, 0, 0, 0, false, false},
+                                      {mode_phare_kickbass, 220, 220, 0, 0, false, false},  {mode_phare_kickbass, 220, 160, 0, 0, false, false},
+                                      {mode_phare_allbass, 200, 128, 0, 30, false, false},  {mode_phare_explosion, 160, 128, 0, 30, false, false},
+                                      {mode_phare_artifice, 220, 160, 0, 30, false, false}, {mode_phare_scintillement, 160, 0, 0, 0, false, false},
+                                      {mode_phare_clignotant, 200, 30, 0, 0, false, false}, {mode_phare_roll, 230, 30, 0, 0, true, false},
+                                      {mode_phare_duos, 230, 20, 0, 0, true, false},        {mode_phare_alternance, 200, 255, 0, 0, false, false}};
+  static const PhareChoix* cats[]  = {veille, voix, calme, moyen, excite, melo, pic};
+  static const uint8_t nbCat[]     = {1, 8, 10, 24, 22, 10, 12};
 
   uint8_t cat;
   if (silence) cat = 0;                                     // plus de son : on eteint
@@ -2954,6 +2998,12 @@ static void mode_phare_dj(void) {
     else cat = score < -0.2f ? 2 : (score > 0.8f ? 4 : 3);
     if (phareCalmeAuto) cat = 2;                            // passage calme : une lampe sur le kick, le reste en veilleuse
   }
+
+  // quelle liste d'effets (la categorie, ou en Full auto : breakdown melodique / pic)
+  uint8_t pool = cat;
+  float rapFA = T.energie / max(T.energieTres, 1.0f);
+  if (phareFullAuto && cat == 1 && M.presence > 0.35f) pool = 5;
+  if (phareFullAuto && cat == 4 && d->arc >= 2 && rapFA > 0.95f) pool = 6;
 
   // fondu : s'eteint en 1 s quand le son se coupe, revient en 0,3 s
   float dtg = min(100.0f, (float)(now - SEGENV.step)); SEGENV.step = now;
@@ -2971,28 +3021,32 @@ static void mode_phare_dj(void) {
   bool change = (SEGENV.call == 0) || d->cat == 255;
   bool suivant = phareSuivantDemande; phareSuivantDemande = false;
   if (suivant) change = true;
-  if (cat != d->cat) {
-    bool urgent = cat <= 1 || d->cat <= 1 || d->cat == 255;
+  // en calme / sans beat, l'effet dure 2 phrases (16 mesures) ; breakdown melodique (Full auto) : 4 phrases
+  bool phraseUtile = finPhrase && (cat >= 3 || (pool == 5 ? phraseIdx % 4 == 0 : phraseIdx % 2 == 0) || !cale);
+  if (cat != d->cat || pool != d->pool) {
+    bool urgent = cat <= 1 || d->cat <= 1 || d->cat == 255 || pool == 5 || d->pool == 5;
     if (urgent || finPhrase) change = true;                 // sinon on attend la fin de la phrase
-    else cat = d->cat;
-  } else if (finPhrase) change = true;                       // nouvel effet a chaque phrase
+    else { cat = d->cat; pool = d->pool; }
+  } else if (phraseUtile) change = true;                     // nouvel effet a chaque phrase (ou toutes les 2-4 en calme)
+  if (finPhrase && cat >= 3 && d->arc < 250) d->arc++;       // depuis combien de phrases le beat tourne
+  if (cat <= 1) d->arc = 0;
   if (finMesure && !change && mesureIdx % 8 == 4 && hw_random8() < 128) phareFlip = !phareFlip;   // petite variation a la 4e mesure
   if (finMesure) d->mesure = mesureIdx;
   if (finPhrase) d->phrase = phraseIdx;
   if (change) {
-    uint8_t nb = nbCat[cat], avant = (cat == d->cat) ? d->idx : 255, nv = 0, va = 0;
+    uint8_t nb = nbCat[pool], avant = (pool == d->pool) ? d->idx : 255, nv = 0, va = 0;
     // anti-repetition : ni l'effet ni la variante parmi les 4 derniers joues
     for (int essai = 0; essai < 12; essai++) {
-      if (suivant && cat == d->cat && essai == 0) nv = (d->idx + 1) % nb;
+      if (suivant && pool == d->pool && essai == 0) nv = (d->idx + 1) % nb;
       else nv = hw_random8() % nb;
       va = hw_random8() < 100 ? 0 : 1 + hw_random8() % 7;
-      uint16_t cle = (cat << 8) | (nv << 3) | va; bool deja = nb > 1 && nv == avant && !suivant;
+      uint16_t cle = (pool << 8) | (nv << 3) | va; bool deja = nb > 1 && nv == avant && !suivant;
       for (uint8_t h = 0; h < d->nHist && !deja; h++) { uint8_t hc = d->hist[h] >> 8, hi = (d->hist[h] >> 3) & 31;
-        if (hc == cat && hi < nbCat[cat] && cats[cat][hi].fx == cats[cat][nv].fx) deja = true; }
+        if (hc == pool && hi < nbCat[pool] && cats[pool][hi].fx == cats[pool][nv].fx) deja = true; }
       if (!deja || essai == 11) break;
     }
-    d->idx = nv; d->cat = cat; d->choix = now;
-    memmove(d->hist + 1, d->hist, 3 * sizeof(uint16_t)); d->hist[0] = (cat << 8) | (nv << 3) | va; if (d->nHist < 4) d->nHist++;
+    d->idx = nv; d->cat = cat; d->pool = pool; d->choix = now;
+    memmove(d->hist + 1, d->hist, 3 * sizeof(uint16_t)); d->hist[0] = (pool << 8) | (nv << 3) | va; if (d->nHist < 4) d->nHist++;
     d->sansKick = hw_random8() < 26;                            // 1 phrase sur 10 sans la couche kick
     // orchestration de la phrase : formation (densite selon l'energie), variante de temps, respirations
     float rap = T.energie / max(T.energieTres, 1.0f);
@@ -3001,9 +3055,15 @@ static void mode_phare_dj(void) {
     else if (cat == 3)           O.formation = r < 20 ? 0 : (r < 30 ? 1 : (r < 65 ? 2 : 3));   // tempo seul 20 %, kick seul 10 %, effet + chick 35 %, tout 35 %
     else if (cat == 2)           O.formation = r < 50 ? 0 : 3;              // calme : une phrase sur deux en tempo seul
     else                         O.formation = 3;
+    if (phareFullAuto && cat >= 3) {                              // Full auto : la densite monte au fil des phrases (arc)
+      if (d->arc < 2)      O.formation = r < 50 ? 0 : 2;          // debut : tempo seul / effet + chick
+      else if (d->arc < 4) O.formation = r < 45 ? 2 : 3;
+      else                 O.formation = r < 25 ? 2 : 3;          // le beat tourne depuis longtemps : tout
+      if (pool == 6) O.formation = 3;
+    }
     O.variante = cat >= 3 ? va : 0;
     O.perm = hw_random8() % 4;                                    // telles quelles / inversees / decalees / depuis le milieu
-    { void (*f)() = cats[cat][nv].fx; if ((f == mode_phare_roll || f == mode_phare_rebond) && O.perm >= 2) O.perm &= 1; }   // les rolls restent entiers
+    { void (*f)() = cats[pool][nv].fx; if ((f == mode_phare_roll || f == mode_phare_rebond) && O.perm >= 2) O.perm &= 1; }   // les rolls restent entiers
     O.lampeVide = hw_random8() % 4;
     phareSeqMotif = hw_random8() % PHARE_NB_MOTIFS;
     // une seule respiration par phrase au maximum : fill 25 %, noir 15 %, mesure presque vide 10 %, rien 50 %
@@ -3016,8 +3076,14 @@ static void mode_phare_dj(void) {
   // contraste : couplets plus bas (40 %), refrains a fond, en douceur
   { float rap = T.energie / max(T.energieTres, 1.0f);
     float cible = 0.6f + 0.4f * constrain((rap - 0.75f) / 0.4f, 0.0f, 1.0f);   // 60 a 100 %
+    if (phareFullAuto) {                                       // Full auto : grands contrastes (breakdown tres doux, pic a fond)
+      static const float niv[7] = {0.3f, 0.4f, 0.5f, 0.6f, 0.9f, 0.3f, 1.0f};
+      cible = niv[min((int)d->pool, 6)];
+      if (d->pool == 3) cible = min(0.95f, 0.6f + 0.08f * d->arc);
+    }
     O.niveau += (cible - O.niveau) * min(1.0f, dtg / 2000.0f); }
-  if (d->idx >= nbCat[d->cat]) d->idx = 0;
+  if (d->pool > 6) d->pool = d->cat;
+  if (d->idx >= nbCat[d->pool]) d->idx = 0;
   Rd.vj = true;
   Rd.vjCouches = d->cat >= 2 ? (0.25f + 0.75f * sens) * (d->cat == 2 ? 1.0f : 1.0f) : (d->cat == 1 ? 0.5f * sens + 0.2f : 0.0f);
   Rd.sansKick = (d->sansKick || O.formation == 2) && d->cat != 2;
@@ -3027,9 +3093,10 @@ static void mode_phare_dj(void) {
     Rd.sansHats = O.formation == 1 || O.formation == 2;                      // effet + chick
   }
   Rd.chickSeul = d->cat == 1;
-  phareVJCat = d->cat;
+  phareVJCat = d->cat; phareVJPool = d->pool;
   Rd.gain = d->gain;
-  Rd.max3 = true;
+  Rd.max3 = !(phareFullAuto && d->pool == 6);              // pic en Full auto : flashs pleins autorises
+  if (phareFullAuto && d->cat >= 3 && M.presence > 0.35f) Rd.melodie = 1.0f;   // une lampe joue avec la melodie
   Rd.douceur = douceur;
   Rd.calme = d->cat == 2;
   // apres un drop manuel : le VJ enchaine Artifice (8 mesures) ou All bass (4) puis Artifice (4), puis reprend
@@ -3041,7 +3108,7 @@ static void mode_phare_dj(void) {
     if (m >= 8) { phareApresVJ = 0; joue = nullptr; phareSuivantDemande = true; }   // le VJ reprend avec un nouvel effet
     else { bool neuf = c != joue; joue = c; Rd.max3 = false; phareJoue(*c, neuf, 0); return; }
   }
-  phareJoue(cats[d->cat][d->idx], change, d->cat <= 1 ? 0 : vitesse);
+  phareJoue(cats[d->pool][d->idx], change, d->cat <= 1 ? 0 : vitesse);
 }
 static const char _data_FX_MODE_PHARE_DJ[] PROGMEM = "0 VJ auto@Calme / rapide,Proximite au beat,Clignote / veilleuse;!;;1f;sx=128,ix=170,c1=60";
 
@@ -3297,6 +3364,7 @@ body:before{content:"";position:fixed;inset:-30%;z-index:-1;background:conic-gra
 .encours .led{width:8px;height:8px;flex:none}
 .rep{display:flex;gap:8px;align-items:flex-end;height:60px;margin-top:6px}.rep div{flex:1;background:linear-gradient(0deg,#e52b20,#ff9b27);border-radius:6px 6px 2px 2px;min-height:2px;position:relative}.rep span{position:absolute;top:-16px;left:0;right:0;text-align:center;font-size:10px;color:var(--org2)}
 .vjinfo{grid-column:1/-1;text-align:center;font:600 10px/1.4 system-ui,sans-serif;letter-spacing:.08em;text-transform:uppercase;color:var(--mu);min-height:14px}
+.seg3.seg2{grid-template-columns:1fr 1fr}
 </style></head><body><div class="w">
 <div class="top">
  <div class="logo"><svg class="car" viewBox="0 0 200 104" aria-hidden="true">
@@ -3326,6 +3394,7 @@ body:before{content:"";position:fixed;inset:-30%;z-index:-1;background:conic-gra
 <div class="seg3 modes" id="modes"><div data-m="auto"><span class="led"></span>Auto</div><div data-m="manuel"><span class="led"></span>Manuel</div><div data-m="expo"><span class="led"></span>Expo</div></div>
 <div class="deck">
  <div class="row r1">
+  <div class="seg3 seg2" id="vjm" style="display:none"><div data-a="1"><span class="led"></span>Full auto</div><div data-a="0"><span class="led"></span>Control</div></div>
   <div class="seg3" id="reac"><div data-r="0"><span class="led"></span>Libre</div><div data-r="1"><span class="led"></span>Tempo</div><div data-r="2"><span class="led"></span>Tempo + percus</div></div>
   <div class="tg" id="inv" style="height:50px;padding:0 16px"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M8 4v16M4 8l4-4 4 4M16 20V4M12 16l4 4 4-4"/></svg>Inverser</div>
  </div>
@@ -3417,6 +3486,7 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
   $('h_sx').querySelector('b').textContent=d.ca?'Énergie · calme auto':'Énergie';
   $('bsv').classList.toggle('arm',!!d.pa);
   if(d.rt!==undefined&&libre('rt'))reacEtat(d.rt);
+  if(d.fa!==undefined&&libre('fa'))vjmEtat(d.fa);
   if(d.inv!==undefined&&libre('inv'))$('inv').classList.toggle('on',!!d.inv);
   if(d.rp){var rb=$('rep').children;for(var q=0;q<4;q++){rb[q].style.height=Math.max(2,d.rp[q]*0.55)+'px';rb[q].firstChild.textContent=d.rp[q]+' %'}}
   if(d.lat!==undefined&&!latDrag)$('lat').textContent=d.lat;
@@ -3440,6 +3510,9 @@ $('hold').addEventListener('pointerdown',function(e){e.preventDefault();hold=!ho
 function reacEtat(r){document.querySelectorAll('#reac div').forEach(function(x){x.classList.toggle('on',x.dataset.r==r)})}
 document.querySelectorAll('#reac div').forEach(function(x){x.addEventListener('pointerdown',function(e){e.preventDefault();reacEtat(x.dataset.r);bloque('rt');snd('r'+x.dataset.r)})});
 $('inv').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);bloque('inv');snd('n'+(on?1:0))});
+// Auto : Full auto / Control
+function vjmEtat(a){document.querySelectorAll('#vjm div').forEach(function(x){x.classList.toggle('on',x.dataset.a==a)})}
+document.querySelectorAll('#vjm div').forEach(function(x){x.addEventListener('pointerdown',function(e){e.preventDefault();vjmEtat(x.dataset.a);bloque('fa');snd('a'+x.dataset.a)})});
 // modes : Auto / Manuel / Expo (chaque mode n'affiche que ses commandes)
 var modeReel='manuel',modeVue='',modeForce=0,dernier={manuel:-1,expo:-1},tuiles={};
 try{dernier=JSON.parse(localStorage.getItem('punto_dernier'))||dernier}catch(x){}
@@ -3453,7 +3526,7 @@ function lance(fx,ctx){ctx=ctx||(tuiles[fx]&&tuiles[fx].m);snd((ctx=='expo'?'g':
 // griser ce qui ne sert pas
 function gr(el,g){if(el)el.classList.toggle('grise',!!g)}
 function griser(d){var mt=libre('mt')?d.mt>0:$('bmt').classList.contains('on');
- gr($('reac'),modeVue!='manuel');
+ gr($('reac'),modeVue!='manuel');$('reac').style.display=modeVue=='auto'?'none':'';$('vjm').style.display=modeVue=='auto'?'':'none';
  document.querySelectorAll('.mini').forEach(function(b){gr(b,!mt)});
  var h0=document.querySelector('#reglh .h');if(h0)gr(h0,!!d.sg)}
 // engrenage
@@ -3654,6 +3727,7 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
     case 'x': pharePads = 15; phareFlashTest = millis(); break;                          // flash test
     case 'f': phareSetFx = constrain(atoi(m + 1), 0, 254); phareFxMesure = phareMesureN; phareExpoForce = false; break;   // changer d'effet
     case 'g': phareSetFx = constrain(atoi(m + 1), 0, 254); phareFxMesure = phareMesureN; phareExpoForce = true; break;    // effet lance depuis l'onglet Expo (sans le son)
+    case 'a': phareFullAuto = m[1] == '1'; phareSensChange = millis(); break;                                        // Full auto / Control
     case 'n': phareInverse = m[1] == '1'; phareSensChange = millis(); break;                                       // Inverser
     case 's':
       if (m[1] == 'x') phareSetSx = constrain(atoi(m + 2), 0, 255);
@@ -3851,16 +3925,17 @@ class UserFxUsermod : public Usermod {
         static const char* const forN[] = {"tempo seul", "kick seul", "effet + chick", "tout"};
         static const char* const varN[] = {"", " · demi-temps", " · double-temps", " · contretemps", " · triolets", " · accent sur le 1", " · tenu", " · sec"};
         static const char* const kickN[] = {"kick lampe 1", "kick 1+2", "kick rebond", "kick lampe 2", "kick lampe 3", "kick lampe 4", "kick 1+4", "kick 2+3", "kick qui monte"};
-        if (phareVJCat >= 2) snprintf(vi, sizeof(vi), "%s · %s%s · %s%s", catN[phareVJCat], phareVJCat == 2 && O.formation == 3 ? "1 lampe sur le kick" : forN[O.formation % 4],
+        if (phareVJPool == 5) snprintf(vi, sizeof(vi), "breakdown mélodique · notes%s", M.accord >= 2 ? " · accords" : "");
+        else if (phareVJCat >= 2) snprintf(vi, sizeof(vi), "%s · %s%s · %s%s", phareVJPool == 6 ? "pic" : catN[phareVJCat], phareVJCat == 2 && O.formation == 3 ? "1 lampe sur le kick" : forN[O.formation % 4],
                                       phareVJCat >= 3 ? varN[O.variante % 8] : "", O.formation == 0 ? "sans flash" : kickN[T.kickMode % 9], phareCalmeAuto ? " · calme auto" : "");
         else snprintf(vi, sizeof(vi), "%s", catN[phareVJCat]);
       }
       char buf[640];
-      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d,\"bc\":%d,\"vf\":%d,\"vn\":\"%s\",\"c2\":%d,\"c3\":%d,\"o\":%d,\"nm\":%d,\"ov\":%d,\"ex\":%d,\"sg\":%d,\"rt\":%d,\"lat\":%d,\"ca\":%d,\"inv\":%d,\"xf\":%d,\"rp\":[%d,%d,%d,%d],\"vi\":\"%s\"}",
+      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d,\"bc\":%d,\"vf\":%d,\"vn\":\"%s\",\"c2\":%d,\"c3\":%d,\"o\":%d,\"nm\":%d,\"ov\":%d,\"ex\":%d,\"sg\":%d,\"rt\":%d,\"lat\":%d,\"ca\":%d,\"inv\":%d,\"xf\":%d,\"rp\":[%d,%d,%d,%d],\"vi\":\"%s\",\"fa\":%d,\"me\":%d}",
                (int)(phareBpmVu + 0.5f), T.kickFlash != kickVu ? 1 : 0, vj ? 1 : 0, nom,
                (vj && phareCalmeAuto) ? min((int)seg.speed, 76) : seg.speed, seg.intensity, (vj && phareCalmeAuto) ? min(255, seg.custom1 + 51) : seg.custom1, phareSens, bri, seg.mode,
                DR.etat == 1 ? (int)(DR.vitesse * 2) : 0, DR.etat == 2 ? 1 : (DR.etat == 3 ? 2 : 0), phareSync ? 1 : 0, phareSurLe1 ? 1 : 0, PHARE_BUILD, bri > 0 ? 1 : 0, (int)constrain(phareVol, 0.0f, 255.0f),
-               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0, phareCale() ? 1 : 0, vf, vn, seg.custom2, seg.custom3 << 3, seg.check1 | (seg.check2 << 1) | (seg.check3 << 2), phareNoirManuel ? 1 : 0, phareOverride ? 1 : 0, phareExpo ? 1 : 0, sg ? 1 : 0, phareSync ? (phareOverride ? 2 : 1) : 0, phareLatence, (vj && phareCalmeAuto) ? 1 : 0, phareInverse ? 1 : 0, phareExpoForce ? 1 : 0, rp[0], rp[1], rp[2], rp[3], vi);
+               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0, phareCale() ? 1 : 0, vf, vn, seg.custom2, seg.custom3 << 3, seg.check1 | (seg.check2 << 1) | (seg.check3 << 2), phareNoirManuel ? 1 : 0, phareOverride ? 1 : 0, phareExpo ? 1 : 0, sg ? 1 : 0, phareSync ? (phareOverride ? 2 : 1) : 0, phareLatence, (vj && phareCalmeAuto) ? 1 : 0, phareInverse ? 1 : 0, phareExpoForce ? 1 : 0, rp[0], rp[1], rp[2], rp[3], vi, phareFullAuto ? 1 : 0, (int)(M.presence * 100));
       kickVu = T.kickFlash;
       static char dernierEnvoi[640] = "";
       if (strcmp(buf, dernierEnvoi)) { strcpy(dernierEnvoi, buf); phareWs.textAll(buf); }   // seulement si quelque chose a change
@@ -3908,6 +3983,7 @@ class UserFxUsermod : public Usermod {
     top[F("Sync general")] = phareSync;
     top[F("Override")] = phareOverride;
     top[F("Inverser")] = phareInverse;
+    top[F("Full auto")] = phareFullAuto;
   }
   bool readFromConfig(JsonObject& root) override {
     JsonObject top = root[F("Phare")];
@@ -3917,6 +3993,7 @@ class UserFxUsermod : public Usermod {
     ok &= getJsonValue(top[F("Sync general")], phareSync, true);
     ok &= getJsonValue(top[F("Override")], phareOverride, false);
     ok &= getJsonValue(top[F("Inverser")], phareInverse, false);
+    ok &= getJsonValue(top[F("Full auto")], phareFullAuto, false);
     return ok;
   }
   uint16_t getId() override { return USERMOD_ID_USER_FX; }
