@@ -1344,12 +1344,13 @@ static float phareForceCouches = 1.0f;    // ... et la force des couches
 // a appeler au debut de chaque animation
 static uint8_t phareSortie[4] = {0};      // niveaux affiches (pour la page de controle)
 static float phareVol = 0;                 // volume du micro (pour la page)
+static bool phareOverride = false;        // Override : kick / chick / hi-hats par-dessus l'effet, meme hors VJ
 static bool phareSync = true;             // "Sync" general (page de controle) : tous les effets suivent le tempo, ou aucun
 static bool phareSurLe1 = false;          // "Sur le 1" : Suivant / Drop / changement d'effet partent au prochain temps 1
 static uint32_t phareMesureN = 0;         // compte les debuts de mesure (temps 1)
 static void phareAnim() {
   phareReactif = phareForce || phareSync;
-  phareCouchesForce = phareForce ? phareForceCouches : 0.0f;   // hors VJ : l'effet joue seul
+  phareCouchesForce = phareForce ? phareForceCouches : (phareOverride ? 1.0f : 0.0f);   // hors VJ : seul, sauf Override
 }
 // temps "musical" : avance au rythme du morceau (1 temps = 500 ms, comme a 120 BPM)
 static uint32_t phareNow() {
@@ -1428,12 +1429,13 @@ static PhareDrop DR;
 static volatile uint8_t phareCmd = 0;       // boutons : 1 montee, 2 drop, 3 suivant
 static bool phareSuivantDemande = false;
 static float phareGain = 1.0f;              // le DJ eteint en fondu quand le son se coupe
+static float phareGainSon() { return 0.3f * powf(10.0f, phareSens / 255.0f); }   // sensibilite : x0,3 a x3
 static float phareGateActif() { return 2.0f + (255 - phareSens) / 255.0f * 38.0f; }   // en dessous : silence
 static bool  phareMax3 = false;             // DJ : jamais les 4 lampes a fond (reserve au drop)
 
 static float phareTempsGrille() { return (float)T.beatCount + constrain((millis() - T.lastTick) / T.period, 0.0f, 0.999f); }
 static void phareMontee(bool manuel) {
-  if (DR.etat == 1 && manuel) { DR.etat = 0; DR.fin = millis(); return; }   // 2e appui : on arrete la montee
+  if (DR.etat == 1 && manuel) { DR.mult = min(16.0f, DR.mult * 2.0f); return; }   // appui suivant = + (jusqu'a x16)
   float b = phareTempsGrille();
   DR.etat = 1; DR.manuel = manuel; DR.t = millis(); DR.mult = 1; DR.vitesse = 1;
   DR.b0 = floorf(b); DR.bDebut = b; DR.pos0 = -(b - DR.b0);                  // la 1re ampoule s'allume tout de suite
@@ -1447,6 +1449,8 @@ static void phareMonteeVitesse(bool plus) {
 static void phareNoir(bool manuel)   { DR.etat = 2; DR.manuel = manuel; DR.t = millis(); DR.kickVu = T.kickFlash; }
 static void phareFlashs(uint8_t nb)  { DR.duo = false; DR.etat = 3; DR.t = millis(); DR.flashs = 0; DR.total = nb; DR.kickVu = T.kickFlash; DR.flashT = 0; }
 // le drop tombe maintenant : 1er flash tout de suite, puis un par kick (4 ou 8 en tout)
+static bool phareApresDrop = false;          // un drop manuel vient de se terminer : enchainer All bass / Artifice
+static bool phareDropManuel = false;
 static void phareDropMaintenant()   { phareFlashs(4); DR.duo = false; DR.flashs = 1; DR.flashT = millis(); DR.kickVu = T.lastTick; }
 
 // avance la machine montee / drop (appele par phareLoop)
@@ -1467,8 +1471,9 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
   if (c == 4 || c == 5) phareMonteeVitesse(c == 4);
   if (c == 6) { phareNoirManuel = !phareNoirManuel; if (phareNoirManuel && DR.etat == 1) DR.etat = 0; }
   if (c == 2) phareNoirManuel = false;
+  if (c == 3 && DR.etat == 1) { DR.etat = 0; DR.fin = now; }   // Suivant arrete la montee
   if (c == 1) phareMontee(true);
-  else if (c == 2) { if (attendre) phareNoir(true); else phareDropMaintenant(); }   // Direct On : le drop part tout de suite
+  else if (c == 2) { phareDropMaintenant(); phareDropManuel = true; }   // Direct On : le drop part tout de suite
   else if (c == 3) { if (attendre) DR.suivantAttente = true; else phareSuivantDemande = true; }
   if (DR.suivantAttente && (temps1 || !attendre)) { DR.suivantAttente = false; phareSuivantDemande = true; }
 
@@ -1501,7 +1506,7 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
       } else if (T.kickFlash != DR.kickVu && T.kickFlash >= DR.t && (DR.flashs == 0 || T.kickFlash > DR.flashT + (uint32_t)(T.period * 0.5f))) {
         DR.kickVu = T.kickFlash; DR.flashs++; DR.flashT = max(T.kickFlash, DR.flashT);   // pas de tempo : sur les kicks entendus
       } else if (DR.flashs > 0 && now - DR.flashT >= T.period) { DR.flashs++; DR.flashT += (uint32_t)T.period; }
-      if (DR.flashs > DR.total || (DR.flashs == 0 && now - DR.t > 3000)) { DR.etat = 0; DR.fin = now; }
+      if (DR.flashs > DR.total || (DR.flashs == 0 && now - DR.t > 3000)) { DR.etat = 0; DR.fin = now; if (phareDropManuel) { phareDropManuel = false; phareApresDrop = true; } }
       break;
   }
   (void)vol;
@@ -1590,9 +1595,10 @@ static void phareLoop() {
   }
 
   // detections
-  float kick  = (fft[0] + fft[1]) / 2.0f;
-  float snare = (fft[2] + fft[3] + fft[9] + fft[10] + fft[11]) / 5.0f;
-  float hat   = (fft[14] + fft[15]) / 2.0f;
+  float g = phareGainSon();
+  float kick  = g * (fft[0] + fft[1]) / 2.0f;
+  float snare = g * (fft[2] + fft[3] + fft[9] + fft[10] + fft[11]) / 5.0f;
+  float hat   = g * (fft[14] + fft[15]) / 2.0f;
   bool k = phareAttaque(0, kick, 2.2f, T.lastKick, 200) && vol > phareGateActif();
   phareAttaque(1, snare, 2.4f, T.lastSnare, 120);
   phareAttaque(2, hat, 2.0f, T.lastHat, 70);
@@ -1720,6 +1726,7 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   static float filt[PHARE_MAX]; static uint32_t prec = 0;
   float dt = min(100.0f, (float)(now - prec)); prec = now;
   float lv[PHARE_MAX];
+  if (!phareForce && phareOverride) phareCouchesForce = 1.0f;   // Override : aussi sur les effets musicaux
   for (unsigned i = 0; i < n; i++) lv[i] = max(lv0[i], veilleuse / 255.0f) * phareGain;
   // douceur (VJ) / mode calme : le fond devient une veilleuse, montees et descentes progressives
   float dou = phareCalme ? max(phareDouceur, 0.8f) : phareDouceur;
@@ -1773,6 +1780,7 @@ static PhareSon phareEcoute(PhareState* s, uint32_t dt) {
     (fft[12] + fft[13] + fft[14] + fft[15]) / 4.0f,       // aigus
     *(float*)um->u_data[0]                                // volume
   };
+  { float g = phareGainSon(); for (int i = 0; i < 4; i++) raw[i] = min(255.0f, raw[i] * g); }
   float sens = phareSens / 255.0f;                      // sensibilite generale
   float plancher = 0.45f - sens * 0.35f;                // part du maximum consideree comme "rien"
   float k = 2.0f - sens * 0.8f;                         // force d'un coup par rapport a la moyenne
@@ -2826,6 +2834,8 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .vj .key small{font:600 12px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.04em;color:var(--led);min-height:12px}
 /* metre */
 .meter{display:block}
+.mbox{display:flex;gap:8px}
+.vf.vs{width:40px;height:330px}
 .dots{display:grid;grid-template-rows:repeat(22,1fr);gap:4px;height:330px;padding:6px 7px;background:#0b0b0d;border-radius:8px;box-shadow:inset 0 2px 8px #000}
 .dots i{width:7px;height:7px;border-radius:50%;background:#26272b}
 .dots i.on{background:#f4f3ef;box-shadow:0 0 5px #fff6}
@@ -2860,8 +2870,9 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .maj .key{height:44px;padding:0 16px;flex-direction:row}
 .maj .msg{color:var(--mu);font-size:11px;margin-top:6px}
 .off{position:fixed;left:0;right:0;bottom:0;background:#2a0f0a;color:#ffb3a6;text-align:center;padding:9px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;display:none}
-@media(max-width:560px){.r2{grid-template-columns:auto auto auto 1fr}.meter{display:none}.vj .key{height:84px}}
-@media(max-width:430px){.pads{grid-template-rows:repeat(4,52px) 38px;width:52px}.vf{width:50px;height:306px}.vf.vb{width:40px}.dots,.lamps{height:306px}.vj .key,.vj .key.mini{height:62px;font-size:9px;letter-spacing:.1em}.mtrow{grid-template-columns:1fr 1fr}.mtrow .key:first-child{grid-column:1/-1}.mod{padding:8px}.row{gap:7px}}
+@media(max-width:560px){.r2{grid-template-columns:auto auto auto 1fr}.vj .key{height:84px}
+ .meter{grid-column:1/-1}.mbox{flex-direction:row;align-items:center}.dots{grid-template-rows:none;grid-template-columns:repeat(22,1fr);height:auto;flex:1}.lamps{grid-template-rows:none;grid-template-columns:repeat(4,1fr);height:36px;width:84px;padding:0}.lamps i{width:auto;height:36px}.vf.vs{height:150px}}
+@media(max-width:430px){.pads{grid-template-rows:repeat(4,52px) 38px;width:52px}.vf{width:50px;height:306px}.vf.vb{width:40px}.vj .key,.vj .key.mini{height:62px;font-size:9px;letter-spacing:.1em}.mtrow{grid-template-columns:1fr 1fr}.mtrow .key:first-child{grid-column:1/-1}.mod{padding:8px}.row{gap:7px}}
 </style></head><body><div class="w">
 <div class="top">
  <div class="logo"><svg viewBox="0 0 32 32"><g fill="none" stroke="#f2f1ee" stroke-width="1.6"><rect x="9" y="2" width="14" height="28" rx="4"/></g><g><circle cx="16" cy="8" r="2.6" fill="#ff3b30"/><circle cx="16" cy="14" r="2.6" fill="#ff3b30"/><circle cx="16" cy="20" r="2.6" fill="#ffa21a"/><circle cx="16" cy="26" r="2.6" fill="#ff3b30"/></g></svg>
@@ -2873,7 +2884,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 <div class="deck">
  <div class="row r1">
   <div class="tg on" id="sync"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></svg>Sync</div>
-  <div class="tg on" id="q1"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg><span id="q1t">Direct On</span></div>
+  <div class="tg" id="ovr"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M3 8h18M3 16h18"/><circle cx="8" cy="8" r="2"/><circle cx="16" cy="16" r="2"/></svg>Override</div>
  </div>
  <div class="row r2">
   <div class="mod"><div class="cap">Lampes</div>
@@ -2891,23 +2902,22 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
   <div class="mod"><div class="cap">VJ</div><div class="vj">
    <div class="mtrow"><div class="key" data-b="1" id="bmt"><span class="led"></span><svg viewBox="0 0 24 24"><path d="m6 11 6-6 6 6"/><path d="m6 18 6-6 6 6"/></svg>Montée<small id="mtx"></small></div>
     <div class="key mini" data-b="5"><svg viewBox="0 0 24 24"><path d="M6 12h12"/></svg></div><div class="key mini" data-b="4"><svg viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></svg></div></div>
-   <div class="key" data-b="6" id="boff"><span class="led"></span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M6.5 17.5l11-11"/></svg>Off<small></small></div>
+   <div class="key" data-b="6" id="boff"><span class="led"></span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M6.5 17.5l11-11"/></svg><span id="offt">Off</span><small></small></div>
    <div class="key hot" data-b="2" id="bdr"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="2.5"/></svg>Drop<small></small></div>
    <div class="key" data-b="3" id="bsv"><span class="led"></span><svg viewBox="0 0 24 24"><path d="m5 5 9 7-9 7z"/><path d="M19 5v14"/></svg>Suivant<small></small></div>
    <div class="key" data-b="t" id="btp"><span class="led"></span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/></svg>Tap<small></small></div>
   </div></div>
-  <div class="mod meter"><div class="cap">Son</div><div style="display:flex;gap:8px"><div class="dots" id="dots"></div><div class="lamps" id="lamps"><i></i><i></i><i></i><i></i></div></div></div>
+  <div class="mod meter"><div class="cap">Son</div><div class="mbox"><div class="dots" id="dots"></div><div class="lamps" id="lamps"><i></i><i></i><i></i><i></i></div><div class="vf vb vs" id="sens"><div class="fill"></div><div class="k"></div></div></div><div class="cap" style="margin-top:8px;text-align:right">Sensib.</div></div>
  </div>
  <div class="mod hs" id="fadersVJ" style="display:none">
   <div class="h vjo" id="h_sx"><div class="t"><span>Calme</span><b>Énergie</b><span>Rapide</span></div><div class="hf" data-k="sx"><div class="f"></div><div class="k"></div></div></div>
   <div class="h vjo" id="h_c1"><div class="t"><span>Clignote</span><b>Douceur</b><span>Veilleuse</span></div><div class="hf" data-k="c1"><div class="f"></div><div class="k"></div></div></div>
   <div class="h vjo" id="h_ix"><div class="t"><span>Libre</span><b>Proximité au beat</b><span>Collé</span></div><div class="hf" data-k="ix"><div class="f"></div><div class="k"></div></div></div>
-  <div class="h vjo" id="h_se"><div class="t"><span>Peu</span><b>Sensibilité</b><span>Beaucoup</span></div><div class="hf" data-k="se"><div class="f"></div><div class="k"></div></div></div>
  </div>
 </div>
-<div class="mod sec" style="margin-top:12px"><div class="cap">Soirée</div><div class="tiles" id="tSoiree"></div></div>
+<div class="mod sec" style="margin-top:12px" id="regl" style="display:none"><div class="cap" id="reglt">Réglages</div><div class="hs" id="reglh"></div><div class="tgs" id="reglo"></div></div>
+<div class="mod sec"><div class="cap">Soirée</div><div class="tiles" id="tSoiree"></div></div>
 <div class="mod sec"><div class="cap">Expo</div><div class="tiles" id="tExpo"></div></div>
-<div class="mod sec" id="regl" style="display:none"><div class="cap" id="reglt">Réglages</div><div class="hs" id="reglh"></div><div class="tgs" id="reglo"></div></div>
 <div class="mod sec"><div class="cap">Firmware</div><div class="maj"><span id="ver" class="cap" style="color:var(--alu2)">Version …</span><div class="key" id="bmaj"><span class="led"></span>Vérifier</div></div><div class="prog" id="barre" style="display:none"><div></div></div><div class="msg" id="majmsg"></div></div>
 </div><div class="off" id="off">Connexion au phare…</div>
 <script>
@@ -2935,20 +2945,21 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
   if(d.lv!==undefined)vu(d.lv);
   if(d.l)lamps(d.l);
   if(d.on!==undefined)$('pwr').classList.toggle('on',!!d.on);
-  var vjOn=!!d.vj;['sx','c1','ix','se'].forEach(function(k){$('h_'+k).classList.toggle('ok',vjOn)});$('fadersVJ').style.display=vjOn?'':'none';
-  ['sx','c1','ix','se'].forEach(function(k){if(d[k]!==undefined&&!drag[k])setH(k,d[k])});
-  if(d.br!==undefined&&!drag.br)setV(d.br);
+  var vjOn=!!d.vj;['sx','c1','ix'].forEach(function(k){$('h_'+k).classList.toggle('ok',vjOn)});$('fadersVJ').style.display=vjOn?'':'none';
+  ['sx','c1','ix'].forEach(function(k){if(d[k]!==undefined&&!drag[k])setH(k,d[k])});
+  if(d.br!==undefined&&!drag.br)vLum.set(d.br);
+  if(d.se!==undefined&&!drag.se)vSens.set(d.se);
   if(d.vj&&d.fm!==undefined)vjId=d.fm;
   ['sx','ix','c1','c2','c3','o'].forEach(function(k){if(d[k]!==undefined)regVals[k]=d[k]});
   if(d.fm!==undefined&&armFx<0&&d.fm!=cur){cur=d.fm;marqueTuile()}
   if(d.fm!==undefined&&armFx<0)chargeReglages(d.fm);majReglages();
   if(d.pf!==undefined&&armFx>=0&&!d.pf){cur=armFx;armFx=-1;marqueTuile()}
   var mt=$('bmt');mt.classList.toggle('on',d.mt>0);$('mtx').textContent=d.mt>0?(d.mt==1?'×½':'×'+d.mt/2):'';
-  if(d.nm!==undefined)$('boff').classList.toggle('on',!!d.nm),$('boff').classList.toggle('off',!!d.nm);
+  if(d.nm!==undefined)offEtat(!!d.nm);
   $('bdr').classList.toggle('on',d.dr==2);$('bdr').classList.toggle('arm',d.dr==1);
   $('bsv').classList.toggle('arm',!!d.pa);
   if(d.sy!==undefined)$('sync').classList.toggle('on',!!d.sy);
-  if(d.s1!==undefined){direct=!d.s1;$('q1').classList.toggle('on',direct);$('q1t').textContent=direct?'Direct On':'Direct Off'}
+  if(d.ov!==undefined)$('ovr').classList.toggle('on',!!d.ov);
   if(d.v!==undefined){$('ver').textContent='Version #'+d.v;if(verLoc!==d.v){verLoc=d.v;afficheMaj()}}
  }}
 conn();
@@ -2964,7 +2975,7 @@ document.querySelectorAll('.pad').forEach(function(p){
  p.addEventListener('pointerup',up);p.addEventListener('pointercancel',up)});
 $('hold').addEventListener('pointerdown',function(e){e.preventDefault();hold=!hold;this.classList.toggle('on',hold);if(!hold){pads=0;showPads();snd('p0')}});
 $('sync').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('y'+(on?1:0))});
-$('q1').addEventListener('pointerdown',function(e){e.preventDefault();direct=!direct;this.classList.toggle('on',direct);$('q1t').textContent=direct?'Direct On':'Direct Off';snd('q'+(direct?0:1))});
+$('ovr').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('v'+(on?1:0))});
 // fader main
 (function(){var el=$('main'),k=el.querySelector('.k'),on=false,v=0;
  for(var i=1;i<10;i++){var t=document.createElement('div');t.className='tick';t.style.top=(i*10)+'%';el.insertBefore(t,k)}
@@ -2975,13 +2986,17 @@ $('q1').addEventListener('pointerdown',function(e){e.preventDefault();direct=!di
  function up(){if(!on)return;on=false;el.classList.remove('act');pos(0);setTimeout(function(){snd('m-')},40)}
  el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
  setInterval(function(){if(on)snd('m'+Math.round(v*1000))},500)})();
+function offEtat(o){$('boff').classList.toggle('on',o);$('boff').classList.toggle('off',o);$('offt').textContent=o?'On':'Off'}
+function monteeStop(){$('bmt').classList.remove('on');$('mtx').textContent=''}
 // boutons VJ : reaction immediate a l'ecran
 document.querySelectorAll('.vj .key').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();press(b);
  var c=b.dataset.b;snd(c=='t'?'t':'b'+c);if(navigator.vibrate)navigator.vibrate(8);
- if(c=='1'){var on=!b.classList.contains('on');b.classList.toggle('on',on);$('mtx').textContent=on?'×1':''}
+ if(c=='1'&&!b.classList.contains('on')){b.classList.add('on');$('mtx').textContent='×1';c=''}
+ if(c=='1')c='4';
  if(c=='4'||c=='5'){var x=$('mtx').textContent;if(x){var r=x=='×½'?0.5:parseFloat(x.slice(1));r=c=='4'?Math.min(16,r*2):Math.max(0.5,r/2);$('mtx').textContent=r==0.5?'×½':'×'+r}}
- if(c=='6'){var o=!b.classList.contains('on');b.classList.toggle('on',o);b.classList.toggle('off',o);if(o){$('bmt').classList.remove('on');$('mtx').textContent=''}}
- if(c=='2'){b.classList.add(direct?'on':'arm');$('boff').classList.remove('on','off')}
+ if(c=='6'){var o=!b.classList.contains('on');offEtat(o);if(o)monteeStop()}
+ if(c=='2'){b.classList.add('on');offEtat(false);monteeStop()}
+ if(c=='3')monteeStop();
  if(c=='3'&&!direct)b.classList.add('arm');
  if(c=='t'){b.classList.add('on');setTimeout(function(){b.classList.remove('on')},120)}})});
 // faders horizontaux
@@ -2995,13 +3010,15 @@ function hfInit(el,k,envoi){
  el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up)}
 document.querySelectorAll('.hs .hf').forEach(function(el){var k=el.dataset.k;hfInit(el,k,function(v){thr(k,k+v)})});
 // luminosite (fader vertical)
-var vb=document.querySelector('.vb');
-function setV(v){var h=vb.clientHeight-48,p=v/255;vb.querySelector('.k').style.top=(24+(1-p)*h)+'px';vb.querySelector('.fill').style.height=Math.max(0,(p*h+10-14))+'px'}
-vb.addEventListener('pointerdown',function(e){e.preventDefault();vb.setPointerCapture(e.pointerId);drag.br=1;mvV(e)});
-vb.addEventListener('pointermove',function(e){if(drag.br)mvV(e)});
-function mvV(e){var r=vb.getBoundingClientRect(),v=Math.round(Math.max(0,Math.min(1,1-(e.clientY-r.top-24)/(r.height-48)))*255);v=Math.max(1,v);setV(v);thr('br','br'+v)}
-setV(255);
-['pointerup','pointercancel'].forEach(function(ev){vb.addEventListener(ev,function(){setTimeout(function(){drag.br=0},400)})});
+// faders verticaux (luminosite, sensibilite)
+function vfInit(el,k,mini){
+ function set(v){var h=el.clientHeight-48,p=v/255;el.querySelector('.k').style.top=(24+(1-p)*h)+'px';el.querySelector('.fill').style.height=Math.max(0,p*h-4)+'px'}
+ function mv(e){var r=el.getBoundingClientRect(),v=Math.round(Math.max(0,Math.min(1,1-(e.clientY-r.top-24)/(r.height-48)))*255);v=Math.max(mini,v);set(v);thr(k,k+v)}
+ el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);drag[k]=1;mv(e)});
+ el.addEventListener('pointermove',function(e){if(drag[k])mv(e)});
+ ['pointerup','pointercancel'].forEach(function(ev){el.addEventListener(ev,function(){setTimeout(function(){drag[k]=0},400)})});
+ set(255);return {set:set}}
+var vLum=vfInit(document.querySelector('.vb[data-k="br"]'),'br',1),vSens=vfInit($('sens'),'se',0);
 // effets (tuiles) : changent tout de suite, ou s'arment jusqu'au prochain 1
 function marqueTuile(){document.querySelectorAll('.tile').forEach(function(t){t.classList.toggle('cur',t.dataset.fx==cur);t.classList.toggle('arm',t.dataset.fx==armFx);t.classList.toggle('sub',t.dataset.fx==vfx&&t.dataset.fx!=cur)})}
 fetch('/presets.json').then(function(r){return r.json()}).then(function(p){
@@ -3010,7 +3027,7 @@ fetch('/presets.json').then(function(r){return r.json()}).then(function(p){
   var d=document.createElement('div');d.className='tile';d.dataset.fx=fx;
   d.innerHTML='<span class="led"></span>';d.appendChild(document.createTextNode(/^0\s/.test(n)?'VJ auto':propre(n)));
   var tx=0,ty=0;d.addEventListener('pointerdown',function(e){tx=e.clientX;ty=e.clientY});
-  d.addEventListener('pointerup',function(e){if(Math.abs(e.clientX-tx)>8||Math.abs(e.clientY-ty)>8)return;press(d);snd('f'+fx);if(direct){cur=fx;armFx=-1}else armFx=fx;marqueTuile();chargeReglages(fx)});
+  d.addEventListener('pointerup',function(e){if(Math.abs(e.clientX-tx)>8||Math.abs(e.clientY-ty)>8)return;press(d);snd('f'+fx);cur=fx;armFx=-1;marqueTuile();chargeReglages(fx)});
   $(expo?'tExpo':'tSoiree').appendChild(d)});marqueTuile()}).catch(function(){});
 // reglages de l'effet en cours (noms tires de l'effet)
 var fxdata=null,reglFx=-1,regVals={};
@@ -3108,7 +3125,7 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
       break;
     }
     case 'y': phareSync = m[1] == '1'; phareSensChange = millis(); break;               // Sync general
-    case 'q': phareSurLe1 = m[1] == '1'; break;                                         // En direct / Sur le 1
+    case 'v': phareOverride = m[1] == '1'; phareSensChange = millis(); break;          // Override
     case 'f': phareSetFx = constrain(atoi(m + 1), 0, 254); phareFxMesure = phareMesureN; break;   // changer d'effet
     case 's':
       if (m[1] == 'x') phareSetSx = constrain(atoi(m + 2), 0, 255);
@@ -3234,6 +3251,27 @@ class UserFxUsermod : public Usermod {
       phareSetFx = -1; stateUpdated(CALL_MODE_DIRECT_CHANGE);
     }
     if (phareSetOn >= 0) { if ((bri > 0) != (phareSetOn == 1)) { toggleOnOff(); stateUpdated(CALL_MODE_BUTTON); } phareSetOn = -1; }
+    // apres un drop manuel : Artifice (8 mesures), ou All bass (4) puis Artifice (4), puis on revient a l'effet d'avant
+    static uint8_t apresEtape = 0, apresAvant = 0, apresSeq[2]; static uint8_t apresMes[2]; static uint32_t apresDebut = 0;
+    if (phareApresDrop) {
+      phareApresDrop = false;
+      int idAll = phareIdDe(&mode_phare_allbass), idArt = phareIdDe(&mode_phare_artifice);
+      if (idAll >= 0 && idArt >= 0) {
+        if (!apresEtape) apresAvant = seg.mode;
+        if (hw_random8() < 128) { apresSeq[0] = idArt; apresMes[0] = 8; apresSeq[1] = 255; }
+        else { apresSeq[0] = idAll; apresMes[0] = 4; apresSeq[1] = idArt; apresMes[1] = 4; }
+        apresEtape = 1; apresDebut = phareMesureN; phareSetFx = apresSeq[0];
+      }
+    }
+    if (apresEtape && phareSetFx < 0) {
+      bool vj = false;
+      if (seg.mode != apresSeq[apresEtape - 1]) apresEtape = 0;                     // tu as choisi un autre effet : on arrete
+      else if (phareMesureN - apresDebut >= apresMes[apresEtape - 1]) {
+        if (apresEtape == 1 && apresSeq[1] != 255) { apresEtape = 2; apresDebut = phareMesureN; phareSetFx = apresSeq[1]; }
+        else { apresEtape = 0; phareSetFx = apresAvant; }
+      }
+      (void)vj;
+    }
     // reglages de l'effet envoyes par la page
     for (int i = 0; i < 8; i++) if (phareSetK[i] >= 0) {
       uint8_t v = (uint8_t)phareSetK[i]; phareSetK[i] = -1;
@@ -3263,11 +3301,11 @@ class UserFxUsermod : public Usermod {
       int vf = vj ? phareIdDe(phareFxJoue) : -1;
       char vn[40] = ""; if (vf >= 0) nomDe((uint8_t)vf, vn, sizeof(vn));
       char buf[460];
-      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d,\"bc\":%d,\"vf\":%d,\"vn\":\"%s\",\"c2\":%d,\"c3\":%d,\"o\":%d,\"nm\":%d}",
+      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d,\"bc\":%d,\"vf\":%d,\"vn\":\"%s\",\"c2\":%d,\"c3\":%d,\"o\":%d,\"nm\":%d,\"ov\":%d}",
                (int)(phareBpmVu + 0.5f), T.kickFlash != kickVu ? 1 : 0, vj ? 1 : 0, nom,
                seg.speed, seg.intensity, seg.custom1, phareSens, bri, seg.mode,
                DR.etat == 1 ? (int)(DR.vitesse * 2) : 0, DR.etat == 2 ? 1 : (DR.etat == 3 ? 2 : 0), phareSync ? 1 : 0, phareSurLe1 ? 1 : 0, PHARE_BUILD, bri > 0 ? 1 : 0, (int)constrain(phareVol, 0.0f, 255.0f),
-               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0, phareCale() ? 1 : 0, vf, vn, seg.custom2, seg.custom3 << 3, seg.check1 | (seg.check2 << 1) | (seg.check3 << 2), phareNoirManuel ? 1 : 0);
+               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0, phareCale() ? 1 : 0, vf, vn, seg.custom2, seg.custom3 << 3, seg.check1 | (seg.check2 << 1) | (seg.check3 << 2), phareNoirManuel ? 1 : 0, phareOverride ? 1 : 0);
       kickVu = T.kickFlash;
       phareWs.textAll(buf);
     }
@@ -3309,6 +3347,7 @@ class UserFxUsermod : public Usermod {
     top[F("Latence micro (ms)")] = phareLatence;
     top[F("Sensibilite generale (0-255)")] = phareSens;
     top[F("Sync general")] = phareSync;
+    top[F("Override")] = phareOverride;
   }
   bool readFromConfig(JsonObject& root) override {
     JsonObject top = root[F("Phare")];
@@ -3316,6 +3355,7 @@ class UserFxUsermod : public Usermod {
     ok &= getJsonValue(top[F("Latence micro (ms)")], phareLatence, (uint16_t)60);
     ok &= getJsonValue(top[F("Sensibilite generale (0-255)")], phareSens, (uint8_t)220);
     ok &= getJsonValue(top[F("Sync general")], phareSync, true);
+    ok &= getJsonValue(top[F("Override")], phareOverride, false);
     return ok;
   }
   uint16_t getId() override { return USERMOD_ID_USER_FX; }
