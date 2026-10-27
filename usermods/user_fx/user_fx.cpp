@@ -3276,11 +3276,13 @@ $('bmaj').addEventListener('click',function(){
   var total=+r.headers.get('Content-Length')||1600000,recu=0,morceaux=[],lecteur=r.body.getReader();
   function lire(){return lecteur.read().then(function(x){if(x.done)return new Blob(morceaux);morceaux.push(x.value);recu+=x.value.length;barre(0.5*Math.min(1,recu/total));msgMaj('Téléchargement… '+Math.round(100*Math.min(1,recu/total))+' %');return lire()})}
   return lire()}).then(function(bin){
+  try{ws.onclose=null;ws.close()}catch(x){}
   return new Promise(function(ok,ko){var fd=new FormData();fd.append('update',bin,'firmware.bin');var x=new XMLHttpRequest();x.open('POST','/update');
    x.upload.onprogress=function(e){if(e.lengthComputable){barre(0.5+0.45*e.loaded/e.total);msgMaj('Installation… '+Math.round(100*e.loaded/e.total)+' % (ne ferme pas la page)')}};
-   x.onload=function(){if(x.status>=200&&x.status<300&&!/failed|denied/i.test(x.responseText))ok();else ko(x.responseText)};x.onerror=function(){ko('')};x.send(fd)})
+   var envoye=false;x.upload.onload=function(){envoye=true};
+   x.onload=function(){if(x.status>=200&&x.status<300)ok();else ko(x.responseText)};x.onerror=function(){if(envoye)ok();else ko('connexion coupée pendant l\'envoi')};x.send(fd)})
  }).then(function(){var t=25;barre(0.95);(function compte(){msgMaj('Installé ! Le phare redémarre… '+t+' s');barre(0.95+0.05*(25-t)/25);if(t--<=0){location.reload();return}setTimeout(compte,1000)})()})
- .catch(function(e){majEnCours=false;$('barre').style.display='none';msgMaj('Échec de la mise à jour (vérifie que « OTA lock » est décoché dans Security & Updates)')})});
+ .catch(function(e){majEnCours=false;$('barre').style.display='none';var t=(typeof e=='string'?e:'').replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();msgMaj('Échec : '+(t?t.slice(0,160):'téléchargement impossible depuis GitHub'));setTimeout(conn,500)})});
 </script></body></html>
 )=====";
 
@@ -3289,6 +3291,7 @@ static AsyncWebSocket phareWs("/phws");
   #define PHARE_BUILD 0
 #endif
 static uint8_t phareIdVJ = 255;
+static volatile bool phareMajEnCours = false;
 static void (*phareRegFx[48])() = {nullptr}; static uint8_t phareRegId[48]; static uint8_t phareRegN = 0;
 static uint8_t phareAjoute(void (*fx)(), const char* data, uint8_t id = 255) {
   uint8_t r = strip.addEffect(id, fx, data);
@@ -3538,7 +3541,7 @@ class UserFxUsermod : public Usermod {
     if (phareSetBri >= 0 && millis() - briT > 80) { bri = phareSetBri; phareSetBri = -1; briT = millis(); stateUpdated(CALL_MODE_DIRECT_CHANGE); }
     // etat envoye a la page, 10 fois par seconde
     static uint32_t envoi = 0, kickVu = 0, nettoie = 0;
-    if (millis() - envoi >= 100 && phareWs.count()) {
+    if (!phareMajEnCours && millis() - envoi >= 100 && phareWs.count()) {
       envoi = millis();
       if (phareCale()) phareBpmVu = phareBpm();          // le BPM reste affiche sur le dernier entendu
       auto nomDe = [](uint8_t id, char* nom, unsigned taille) {
@@ -3564,6 +3567,9 @@ class UserFxUsermod : public Usermod {
     }
     if (millis() - nettoie > 2000) { nettoie = millis(); phareWs.cleanupClients(); }
   }
+
+  // mise a jour en cours : on arrete d'envoyer l'etat a la page (moins de charge pendant l'ecriture)
+  void onUpdateBegin(bool debut) override { phareMajEnCours = debut; if (debut) phareWs.closeAll(); }
 
   void connected() override {
     static bool fait = false;
