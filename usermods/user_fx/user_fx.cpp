@@ -1342,6 +1342,8 @@ static bool  phareForce = false;          // le DJ impose le mode reactif
 static float phareForceCouches = 1.0f;    // ... et la force des couches
 
 // a appeler au debut de chaque animation
+static uint8_t phareSortie[4] = {0};      // niveaux affiches (pour la page de controle)
+static float phareVol = 0;                 // volume du micro (pour la page)
 static bool phareSync = true;             // "Sync" general (page de controle) : tous les effets suivent le tempo, ou aucun
 static bool phareSurLe1 = false;          // "Sur le 1" : Suivant / Drop / changement d'effet partent au prochain temps 1
 static uint32_t phareMesureN = 0;         // compte les debuts de mesure (temps 1)
@@ -1455,7 +1457,7 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
 
   uint8_t c = phareCmd; phareCmd = 0;
   if (c == 1) phareMontee(true);
-  else if (c == 2) phareNoir(true);
+  else if (c == 2) { if (attendre) phareNoir(true); else phareDropMaintenant(); }   // Direct On : le drop part tout de suite
   else if (c == 3) { if (attendre) DR.suivantAttente = true; else phareSuivantDemande = true; }
   if (DR.suivantAttente && (temps1 || !attendre)) { DR.suivantAttente = false; phareSuivantDemande = true; }
 
@@ -1551,6 +1553,7 @@ static void phareLoop() {
   if (!UsermodManager::getUMData(&um, USERMOD_ID_AUDIOREACTIVE)) return;
   uint8_t* fft = (uint8_t*)um->u_data[2];
   float vol = *(float*)um->u_data[0];
+  phareVol = vol;
 
   // energies (pour le DJ)
   T.energie      = T.energie      * 0.94f  + vol * 0.06f;
@@ -1732,7 +1735,7 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   }
   uint8_t pads = pharePads;
   for (unsigned i = 0; i < n && i < 8; i++) if (pads & (1 << i)) lv[i] = 1.0f;
-  for (unsigned i = 0; i < n; i++) SEGMENT.setPixelColor(i, color_fade(c, phareOut(lv[i])));
+  for (unsigned i = 0; i < n; i++) { SEGMENT.setPixelColor(i, color_fade(c, phareOut(lv[i]))); if (i < 4) phareSortie[i] = (uint8_t)(constrain(lv[i], 0.0f, 1.0f) * 255); }
   phareReactif = false; phareCouchesForce = 0.0f; phareGain = 1.0f; phareSansKick = false;
 }
 static void phareDraw(PhareState* s, unsigned n, uint8_t veilleuse) { phareRendu(s->level, n, veilleuse); }
@@ -2729,121 +2732,244 @@ static const char _data_FX_MODE_PHARE_AUTO_ANIM[] PROGMEM = "30 Auto animations@
 static const char PAGE_PHARE[] PROGMEM = R"=====(<!doctype html><html lang="fr"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes"><meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
 <title>Phare</title>
 <style>
-:root{--bg:#0d0d0f;--pan:#18181c;--bd:#2a2a31;--tx:#eceae4;--mu:#8b8a86;--ac:#ffb238;--hot:#ff5a3c}
+:root{--bg:#050506;--deck:#0d0d0f;--pan:#1a1b1f;--pan2:#232429;--alu:#8d8f96;--alu2:#a7a9b0;--line:#2c2d33;--tx:#f2f1ee;--mu:#7d7e84;
+--led:#ff8a2a;--red:#ff3b30;--amb:#ffa21a;--vio:#9b7bff;--glow:0 0 10px}
 *{box-sizing:border-box;-webkit-tap-highlight-color:transparent;user-select:none;-webkit-user-select:none}
-html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.3 -apple-system,system-ui,sans-serif;touch-action:manipulation;overscroll-behavior:none}
-.pad,.vf,.b,.hf{touch-action:none}
-.w{max-width:760px;margin:0 auto;padding:12px 14px 24px}
-.top{display:flex;align-items:center;gap:12px;margin-bottom:12px}
-.top h1{font-size:20px;margin:0;letter-spacing:.04em}
-.bpm{margin-left:auto;font-variant-numeric:tabular-nums;color:var(--mu)}
-.bpm b{color:var(--tx);font-size:20px}
-.dot{width:14px;height:14px;border-radius:50%;background:#333;transition:background .08s}
-.dot.on{background:var(--ac);box-shadow:0 0 12px var(--ac)}
-.fx{color:var(--mu);font-size:13px;margin:-6px 0 12px;min-height:16px}
-.g{display:grid;grid-template-columns:auto auto 1fr;gap:12px}
-.pan{background:var(--pan);border:1px solid var(--bd);border-radius:14px;padding:10px}
-.lab{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mu);margin-bottom:8px;text-align:center}
-.pads{display:flex;flex-direction:column;gap:8px}
-.pad{width:62px;height:62px;border-radius:12px;background:#222228;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:600}
-.pad.on{background:var(--ac);color:#111;border-color:var(--ac)}
-.pad.solid{height:44px;font-size:13px}
-.vf{position:relative;width:64px;height:322px;border-radius:12px;background:linear-gradient(#26262c,#1c1c21);border:1px solid var(--bd);overflow:hidden}
-.vf .k{position:absolute;left:4px;right:4px;height:40px;border-radius:9px;background:#3a3a42;transform:translateY(-50%);transition:background .1s}
-.vf.act .k{background:var(--ac)}
-.btns{display:grid;grid-template-columns:1fr 1fr;gap:8px}
-.b{height:74px;border-radius:12px;background:#222228;border:1px solid var(--bd);display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:600}
-.b:active,.b.on{background:#34343c}
-.b.drop{background:var(--hot);border-color:var(--hot);color:#111}
-.b.mt.on{background:var(--ac);border-color:var(--ac);color:#111}
-.b.drop.on{animation:cl .25s steps(2) infinite}@keyframes cl{50%{opacity:.35}}
-.pad.on.r{background:#e8332a;border-color:#e8332a;color:#fff}.pad.r{color:#ff8a80}.pad.o{color:#ffb74d}.pad.on.o{background:#ff9f1a;border-color:#ff9f1a;color:#111}
-.sw{display:flex;gap:8px;margin-bottom:12px}.sw .tog{margin:0;flex:1;justify-content:center;background:var(--pan);border:1px solid var(--bd);border-radius:12px;padding:10px;font-size:13px;color:var(--tx)}
-.vj{display:none}.vj.ok{display:block}
-.tog{display:flex;align-items:center;justify-content:center;gap:8px;margin-top:8px;font-size:12px;color:var(--mu)}
-.tog i{width:34px;height:20px;border-radius:10px;background:#333;position:relative;display:inline-block}
-.tog i:after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:#888;transition:.15s}
-.tog.on i{background:var(--ac)}.tog.on i:after{left:16px;background:#111}
-.hs{margin-top:12px;display:flex;flex-direction:column;gap:12px}
-.h .t{display:flex;justify-content:space-between;font-size:12px;color:var(--mu);margin-bottom:5px}
-.h .t b{color:var(--tx);font-weight:500}
-.hf{position:relative;height:44px;border-radius:12px;background:#1c1c21;border:1px solid var(--bd);overflow:hidden}
-.hf .f{position:absolute;left:0;top:0;bottom:0;background:#2e2a22}
-.hf .k{position:absolute;top:4px;bottom:4px;width:26px;margin-left:-13px;border-radius:8px;background:var(--ac)}
-.tiles{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px}
-.tile{padding:12px 8px;border-radius:10px;background:#1c1c21;border:1px solid var(--bd);font-size:13px;text-align:center;min-height:48px;display:flex;align-items:center;justify-content:center}
-.tile.cur{border-color:var(--ac);color:var(--ac)}
-.maj{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;color:var(--mu)}.maj .b{height:48px;padding:0 18px;font-size:14px}
-.sec{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mu);margin:18px 0 0}
-.off{position:fixed;inset:auto 0 0 0;background:#3a1d17;color:#ffcfc4;text-align:center;padding:8px;font-size:13px;display:none}
-@media(max-width:420px){.pad{width:54px;height:54px}.vf{width:56px;height:290px}.b{height:64px}}
+html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -apple-system,"SF Pro Text","Helvetica Neue",system-ui,sans-serif;touch-action:manipulation;overscroll-behavior:none}
+.key,.vf,.hf,.tile,.tg,.pwr{touch-action:none;cursor:pointer}
+.w{max-width:820px;margin:0 auto;padding:14px 14px 28px}
+.cap{font-size:10px;letter-spacing:.22em;text-transform:uppercase;color:var(--mu)}
+/* entete */
+.top{display:flex;align-items:center;gap:14px;padding:6px 4px 14px}
+.logo{display:flex;align-items:center;gap:10px}
+.logo svg{width:30px;height:30px}
+.logo b{font-size:22px;letter-spacing:.28em;font-weight:700}
+.logo span{display:block;font-size:10px;letter-spacing:.2em;color:var(--mu);margin-top:2px;text-transform:uppercase}
+.lcd{margin-left:auto;background:#000;border:1px solid var(--line);border-radius:10px;padding:6px 12px;display:flex;align-items:center;gap:10px;box-shadow:inset 0 2px 8px #000}
+.lcd b{font:600 22px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.06em;min-width:44px;text-align:right}
+.lcd .cap{font-size:9px}
+.led{width:9px;height:9px;border-radius:50%;background:#2a1a10;flex:none;transition:background .06s,box-shadow .06s}
+.led.on{background:var(--led);box-shadow:var(--glow) var(--led)}
+.pwr{width:46px;height:46px;border-radius:50%;background:radial-gradient(circle at 50% 35%,#3a3b41,#18191c);border:1px solid #3a3b42;display:flex;align-items:center;justify-content:center;box-shadow:0 3px 8px #000,inset 0 1px 0 #55565d}
+.pwr svg{width:20px;height:20px;stroke:#666;transition:stroke .1s}
+.pwr.on svg{stroke:var(--led);filter:drop-shadow(0 0 5px var(--led))}
+.fx{display:flex;align-items:center;gap:8px;margin:0 4px 12px;color:var(--alu2);font-size:12px;letter-spacing:.08em;text-transform:uppercase;min-height:16px}
+/* chassis */
+.deck{background:linear-gradient(#cfd0d4,#9c9ea4);border-radius:18px;padding:10px;box-shadow:0 10px 30px #000,inset 0 1px 0 #fff}
+.mod{background:var(--pan);border-radius:12px;padding:10px;box-shadow:inset 0 1px 0 #34353b,0 2px 0 #6e7076}
+.mod>.cap{display:flex;align-items:center;gap:6px;margin-bottom:10px}
+.mod>.cap:before{content:"";width:8px;height:8px;border-radius:2px;background:#e9e9ea;opacity:.85}
+.row{display:grid;gap:10px}
+.r1{grid-template-columns:1fr 1fr;margin-bottom:10px}
+.r2{grid-template-columns:auto auto 1fr auto;margin-bottom:10px}
+/* touches */
+.key{position:relative;border-radius:10px;background:linear-gradient(#2e2f35,#1f2024);border:1px solid #0b0b0d;box-shadow:inset 0 1px 0 #44454c,0 3px 0 #0b0b0d,0 4px 8px #0008;
+ display:flex;flex-direction:column;align-items:center;justify-content:center;gap:5px;color:var(--tx);font-size:11px;letter-spacing:.16em;text-transform:uppercase;transition:transform .04s,box-shadow .04s,background .06s}
+.key svg{width:22px;height:22px;stroke:currentColor;fill:none;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+.key .led{position:absolute;top:7px;left:7px;width:7px;height:7px}
+.key.press,.key:active{transform:translateY(2px);box-shadow:inset 0 1px 0 #44454c,0 1px 0 #0b0b0d,0 1px 3px #0008;background:linear-gradient(#36373e,#26272c)}
+.key.on .led{background:var(--led);box-shadow:var(--glow) var(--led)}
+.key.arm .led{background:var(--led);animation:arm .3s steps(2) infinite}
+@keyframes arm{50%{background:#2a1a10;box-shadow:none}}
+.key.hot{color:#ff9a7a}
+.key.on.hot{background:linear-gradient(#ff7a3d,#e2481f);color:#111;border-color:#7a2410}
+.key.on.hot .led{background:#fff;box-shadow:0 0 8px #fff}
+/* lampes */
+.pads{display:grid;grid-template-rows:repeat(4,58px) 40px;gap:8px;width:64px}
+.pad{font:700 18px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:0}
+.pad.r{color:#ff7a70}.pad.o{color:#ffbe5c}
+.pad.on.r{background:linear-gradient(#ff4a3d,#c8231a);color:#fff;border-color:#5c120c;box-shadow:inset 0 1px 0 #ff9a90,0 1px 0 #0b0b0d,0 0 18px #ff3b3088}
+.pad.on.o{background:linear-gradient(#ffb43a,#e8860c);color:#111;border-color:#6b3d05;box-shadow:inset 0 1px 0 #ffe0a0,0 1px 0 #0b0b0d,0 0 18px #ffa21a88}
+.pad.solid{font-family:inherit;font-size:10px;font-weight:600;letter-spacing:.16em}
+.pad.solid.on{background:linear-gradient(#f4f4f2,#c9cac9);color:#111}
+.tg{display:flex;align-items:center;justify-content:center;gap:8px;height:44px;border-radius:10px;background:#141518;border:1px solid #0b0b0d;box-shadow:inset 0 2px 6px #000;font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--mu)}
+.tg svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.tg.on{color:var(--tx)}.tg.on .led{background:var(--led);box-shadow:var(--glow) var(--led)}
+.hold{height:34px;margin-top:8px;font-size:9px}
+/* fader main */
+.vf{position:relative;width:62px;height:330px;border-radius:10px;background:#0f1012;box-shadow:inset 0 2px 10px #000;border:1px solid #000}
+.vf:before{content:"";position:absolute;left:50%;top:14px;bottom:14px;width:4px;margin-left:-2px;border-radius:2px;background:#000;box-shadow:0 1px 0 #2c2d33}
+.vf .tick{position:absolute;left:8px;right:8px;height:1px;background:#2a2b30}
+.vf .k{position:absolute;left:6px;right:6px;height:44px;border-radius:7px;transform:translateY(-50%);
+ background:linear-gradient(#d9dadd,#8f9197);box-shadow:0 4px 8px #000,inset 0 1px 0 #fff;transition:top .25s}
+.vf .k:after{content:"";position:absolute;left:8px;right:8px;top:50%;height:2px;margin-top:-1px;background:#222}
+.vf.act .k{transition:none;background:linear-gradient(#ffb070,#ff7a2a)}
+/* VJ */
+.vj{display:grid;grid-template-columns:1fr 1fr;gap:8px;align-content:start}
+.vj .key{height:92px}
+.vj .key small{font:600 12px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.04em;color:var(--led);min-height:12px}
+/* metre */
+.meter{display:block}
+.dots{display:grid;grid-template-rows:repeat(22,1fr);gap:4px;height:330px;padding:6px 7px;background:#0b0b0d;border-radius:8px;box-shadow:inset 0 2px 8px #000}
+.dots i{width:7px;height:7px;border-radius:50%;background:#26272b}
+.dots i.on{background:#f4f3ef;box-shadow:0 0 5px #fff6}
+.dots i.on.pk{background:var(--led);box-shadow:var(--glow) var(--led)}
+.lamps{display:grid;grid-template-rows:repeat(4,1fr);gap:8px;height:330px;padding:6px 0}
+.lamps i{width:16px;border-radius:5px;background:#26272b;transition:background .08s,box-shadow .08s}
+/* faders horizontaux */
+.hs{display:grid;gap:12px}
+.h .t{display:flex;justify-content:space-between;align-items:center;margin-bottom:6px}
+.h .t b{font-size:11px;letter-spacing:.18em;text-transform:uppercase;font-weight:600}
+.h .t span{font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--mu)}
+.hf{position:relative;height:44px;border-radius:10px;background:#0f1012;box-shadow:inset 0 2px 8px #000;border:1px solid #000}
+.hf:before{content:"";position:absolute;top:50%;left:14px;right:14px;height:4px;margin-top:-2px;border-radius:2px;background:#000;box-shadow:0 1px 0 #2c2d33}
+.hf .f{position:absolute;top:50%;left:14px;height:4px;margin-top:-2px;border-radius:2px;background:var(--led);box-shadow:0 0 8px var(--led)}
+.hf .k{position:absolute;top:4px;bottom:4px;width:30px;margin-left:-15px;border-radius:7px;background:linear-gradient(90deg,#d9dadd,#8f9197);box-shadow:0 3px 6px #000,inset 1px 0 0 #fff}
+.hf .k:after{content:"";position:absolute;top:8px;bottom:8px;left:50%;width:2px;margin-left:-1px;background:#222}
+.vjo{display:none}.vjo.ok{display:block}
+/* favoris */
+.tiles{display:grid;grid-template-columns:repeat(auto-fill,minmax(112px,1fr));gap:8px}
+.tile{position:relative;min-height:54px;padding:16px 8px 8px;border-radius:9px;background:linear-gradient(#2a2b31,#1d1e22);border:1px solid #0b0b0d;box-shadow:inset 0 1px 0 #3f4047,0 2px 0 #0b0b0d;
+ font-size:11px;letter-spacing:.06em;text-align:center;display:flex;align-items:center;justify-content:center;color:var(--alu2)}
+.tile .led{position:absolute;top:6px;left:6px;width:6px;height:6px}
+.tile .tag{position:absolute;top:5px;right:7px;font-size:8px;letter-spacing:.16em;color:var(--mu)}
+.tile.cur{color:var(--tx)}.tile.cur .led{background:var(--led);box-shadow:var(--glow) var(--led)}
+.tile.arm .led{background:var(--led);animation:arm .3s steps(2) infinite}
+.tile.press{transform:translateY(1px);background:linear-gradient(#34353c,#25262b)}
+.sec{margin-top:10px}
+.maj{display:flex;align-items:center;justify-content:space-between;gap:12px}
+.maj .key{height:44px;padding:0 16px;flex-direction:row}
+.maj .msg{color:var(--mu);font-size:11px;margin-top:6px}
+.off{position:fixed;left:0;right:0;bottom:0;background:#2a0f0a;color:#ffb3a6;text-align:center;padding:9px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;display:none}
+@media(max-width:560px){.r2{grid-template-columns:auto auto 1fr}.meter{display:none}.vj .key{height:84px}}
+@media(max-width:400px){.pads{grid-template-rows:repeat(4,52px) 38px;width:56px}.vf{width:54px;height:306px}}
 </style></head><body><div class="w">
-<div class="top"><div class="dot" id="dot"></div><h1>Phare</h1><div class="bpm"><b id="bpm">--</b> BPM</div></div>
-<div class="fx" id="fx"></div>
-<div class="sw"><div class="tog on" id="sync"><i></i>Sync</div><div class="tog" id="q1"><i></i><span id="q1t">En direct</span></div></div>
-<div class="g">
- <div class="pan"><div class="lab">Lampes</div><div class="pads" id="pads">
-  <div class="pad r" data-l="3">4</div><div class="pad r" data-l="2">3</div><div class="pad o" data-l="1">2</div><div class="pad r" data-l="0">1</div>
-  <div class="pad solid" data-l="all">Solid</div></div>
-  <div class="tog" id="hold"><i></i>Maintien</div></div>
- <div class="pan"><div class="lab">Main</div><div class="vf" id="main"><div class="k" style="top:100%"></div></div></div>
- <div class="pan"><div class="lab">VJ</div><div class="btns">
-  <div class="b mt" data-b="1" id="bmt">Montée</div><div class="b drop" data-b="2" id="bdr">Drop</div>
-  <div class="b" data-b="3">Suivant</div><div class="b" data-b="t">Tap</div></div></div>
+<div class="top">
+ <div class="logo"><svg viewBox="0 0 32 32"><g fill="none" stroke="#f2f1ee" stroke-width="1.6"><rect x="9" y="2" width="14" height="28" rx="4"/></g><g><circle cx="16" cy="8" r="2.6" fill="#ff3b30"/><circle cx="16" cy="14" r="2.6" fill="#ff3b30"/><circle cx="16" cy="20" r="2.6" fill="#ffa21a"/><circle cx="16" cy="26" r="2.6" fill="#ff3b30"/></g></svg>
+  <div><b>PHARE</b><span>punto 1</span></div></div>
+ <div class="lcd"><span class="led" id="dot"></span><b id="bpm">---</b><span class="cap">bpm</span></div>
+ <div class="pwr on" id="pwr"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.6a8 8 0 1 0 11.4 0"/></svg></div>
 </div>
-<div class="hs pan">
- <div class="h vj" id="h_sx"><div class="t"><span>Calme</span><b>VJ</b><span>Rapide</span></div><div class="hf" data-k="sx"><div class="f"></div><div class="k"></div></div></div>
- <div class="h vj" id="h_c1"><div class="t"><span>Clignote</span><b>VJ</b><span>Veilleuse</span></div><div class="hf" data-k="c1"><div class="f"></div><div class="k"></div></div></div>
- <div class="h vj" id="h_ix"><div class="t"><span>Libre</span><b>Proximité au beat</b><span>Collé</span></div><div class="hf" data-k="ix"><div class="f"></div><div class="k"></div></div></div>
- <div class="h"><div class="t"><span>Peu</span><b>Sensibilité</b><span>Beaucoup</span></div><div class="hf" data-k="se"><div class="f"></div><div class="k"></div></div></div>
- <div class="h"><div class="t"><span>-</span><b>Luminosité</b><span>+</span></div><div class="hf" data-k="br"><div class="f"></div><div class="k"></div></div></div>
+<div class="fx"><span class="led on" style="width:6px;height:6px"></span><span id="fx">—</span></div>
+<div class="deck">
+ <div class="row r1">
+  <div class="tg on" id="sync"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5"/><path d="M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></svg>Sync</div>
+  <div class="tg on" id="q1"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M13 2 4 14h7l-1 8 9-12h-7z"/></svg><span id="q1t">Direct On</span></div>
+ </div>
+ <div class="row r2">
+  <div class="mod"><div class="cap">Lampes</div>
+   <div class="pads">
+    <div class="key pad r" data-l="3"><span class="led"></span>4</div>
+    <div class="key pad r" data-l="2"><span class="led"></span>3</div>
+    <div class="key pad o" data-l="1"><span class="led"></span>2</div>
+    <div class="key pad r" data-l="0"><span class="led"></span>1</div>
+    <div class="key pad solid" data-l="all">Solid</div>
+   </div>
+   <div class="tg hold" id="hold"><span class="led"></span>Maintien</div>
+  </div>
+  <div class="mod"><div class="cap">Main</div><div class="vf" id="main"><div class="k"></div></div></div>
+  <div class="mod"><div class="cap">VJ</div><div class="vj">
+   <div class="key" data-b="1" id="bmt"><span class="led"></span><svg viewBox="0 0 24 24"><path d="m6 11 6-6 6 6"/><path d="m6 18 6-6 6 6"/></svg>Montée<small id="mtx"></small></div>
+   <div class="key hot" data-b="2" id="bdr"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="2.5"/></svg>Drop<small></small></div>
+   <div class="key" data-b="3" id="bsv"><span class="led"></span><svg viewBox="0 0 24 24"><path d="m5 5 9 7-9 7z"/><path d="M19 5v14"/></svg>Suivant<small></small></div>
+   <div class="key" data-b="t" id="btp"><span class="led"></span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/></svg>Tap<small></small></div>
+  </div></div>
+  <div class="mod meter"><div class="cap">Son</div><div style="display:flex;gap:8px"><div class="dots" id="dots"></div><div class="lamps" id="lamps"><i></i><i></i><i></i><i></i></div></div></div>
+ </div>
+ <div class="mod hs">
+  <div class="h vjo" id="h_sx"><div class="t"><span>Calme</span><b>Énergie</b><span>Rapide</span></div><div class="hf" data-k="sx"><div class="f"></div><div class="k"></div></div></div>
+  <div class="h vjo" id="h_c1"><div class="t"><span>Clignote</span><b>Douceur</b><span>Veilleuse</span></div><div class="hf" data-k="c1"><div class="f"></div><div class="k"></div></div></div>
+  <div class="h vjo" id="h_ix"><div class="t"><span>Libre</span><b>Proximité au beat</b><span>Collé</span></div><div class="hf" data-k="ix"><div class="f"></div><div class="k"></div></div></div>
+  <div class="h"><div class="t"><span>Peu</span><b>Sensibilité</b><span>Beaucoup</span></div><div class="hf" data-k="se"><div class="f"></div><div class="k"></div></div></div>
+  <div class="h"><div class="t"><span>−</span><b>Luminosité</b><span>+</span></div><div class="hf" data-k="br"><div class="f"></div><div class="k"></div></div></div>
+ </div>
 </div>
-<div class="sec">Favoris</div><div class="tiles" id="tiles"></div>
-<div class="sec">Firmware</div><div class="maj"><span id="ver">Version …</span><div class="b" id="bmaj">Vérifier</div></div><div class="fx" id="majmsg" style="margin-top:8px"></div>
+<div class="mod sec" style="margin-top:12px"><div class="cap">Effets</div><div class="tiles" id="tiles"></div></div>
+<div class="mod sec"><div class="cap">Firmware</div><div class="maj"><span id="ver" class="cap" style="color:var(--alu2)">Version …</span><div class="key" id="bmaj"><span class="led"></span>Vérifier</div></div><div class="msg" id="majmsg"></div></div>
 </div><div class="off" id="off">Connexion au phare…</div>
 <script>
-var ws,last={},pads=0,hold=false,vals={},cur=-1,vjOn=false,drag={};
+var ws,last={},pads=0,hold=false,drag={},cur=-1,armFx=-1,direct=true;
+function $(i){return document.getElementById(i)}
 function snd(m){if(ws&&ws.readyState==1)ws.send(m)}
-function thr(k,m){var n=Date.now();if(last[k]&&n-last[k]<35){clearTimeout(last[k+'t']);last[k+'t']=setTimeout(function(){snd(m);last[k]=Date.now()},35);return}last[k]=n;snd(m)}
+function thr(k,m){var n=Date.now();clearTimeout(last[k+'t']);if(last[k]&&n-last[k]<30){last[k+'t']=setTimeout(function(){snd(m);last[k]=Date.now()},30);return}last[k]=n;snd(m)}
+function press(el){el.classList.add('press');setTimeout(function(){el.classList.remove('press')},120)}
+// vumetre
+var dots=$('dots');for(var i=0;i<22;i++){var d=document.createElement('i');dots.appendChild(d)}
+var dl=dots.children,pk=0;
+function vu(v){var n=Math.round(v/255*22);pk=Math.max(n,pk-1);for(var i=0;i<22;i++){var j=21-i;dl[i].className=(j<n?'on':'')+(j==pk-1&&pk>1?' on pk':'')}}
+var lampEls=$('lamps').children,lampCol=['#ff3b30','#ffa21a','#ff3b30','#ff3b30'];
+function lamps(a){for(var i=0;i<4;i++){var v=a[i]/255,el=lampEls[3-i],c=lampCol[i];el.style.background=v>0.04?c:'#26272b';el.style.opacity=v>0.04?0.25+0.75*v:1;el.style.boxShadow=v>0.3?'0 0 '+(6+12*v)+'px '+c:'none'}}
 function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
- ws.onopen=function(){document.getElementById('off').style.display='none'};
- ws.onclose=function(){document.getElementById('off').style.display='block';setTimeout(conn,1500)};
+ ws.onopen=function(){$('off').style.display='none'};
+ ws.onclose=function(){$('off').style.display='block';setTimeout(conn,1200)};
  ws.onmessage=function(e){try{var d=JSON.parse(e.data)}catch(x){return}
-  document.getElementById('bpm').textContent=d.b?d.b:'--';
-  if(d.k){var t=document.getElementById('dot');t.classList.add('on');setTimeout(function(){t.classList.remove('on')},90)}
-  if(d.fx!==undefined)document.getElementById('fx').textContent=d.fx;
-  if(d.v!==undefined){document.getElementById('ver').textContent='Version #'+d.v;if(verLoc!==d.v){verLoc=d.v;afficheMaj()}}
-  vjOn=!!d.vj;['sx','c1','ix'].forEach(function(k){document.getElementById('h_'+k).classList.toggle('ok',vjOn)});
+  $('bpm').textContent=d.b?d.b:'---';
+  if(d.k){var t=$('dot');t.classList.add('on');setTimeout(function(){t.classList.remove('on')},90)}
+  if(d.fx!==undefined)$('fx').textContent=d.fx;
+  if(d.lv!==undefined)vu(d.lv);
+  if(d.l)lamps(d.l);
+  if(d.on!==undefined)$('pwr').classList.toggle('on',!!d.on);
+  var vjOn=!!d.vj;['sx','c1','ix'].forEach(function(k){$('h_'+k).classList.toggle('ok',vjOn)});
   ['sx','c1','ix','se','br'].forEach(function(k){if(d[k]!==undefined&&!drag[k])setH(k,d[k])});
-  if(d.fm!==undefined&&d.fm!=cur){cur=d.fm;document.querySelectorAll('.tile').forEach(function(t){t.classList.toggle('cur',t.dataset.fx==cur)})}
-  var mt=document.getElementById('bmt');mt.classList.toggle('on',d.mt>0);mt.textContent=d.mt>0?'Montée ×'+d.mt:'Montée';
-  document.getElementById('bdr').classList.toggle('on',!!d.dr);
-  if(d.sy!==undefined)document.getElementById('sync').classList.toggle('on',!!d.sy);
-  if(d.s1!==undefined){document.getElementById('q1').classList.toggle('on',!!d.s1);document.getElementById('q1t').textContent=d.s1?'Sur le 1':'En direct'}
+  if(d.fm!==undefined&&armFx<0&&d.fm!=cur){cur=d.fm;marqueTuile()}
+  if(d.pf!==undefined&&armFx>=0&&!d.pf){cur=armFx;armFx=-1;marqueTuile()}
+  var mt=$('bmt');mt.classList.toggle('on',d.mt>0);$('mtx').textContent=d.mt>0?'×'+d.mt:'';
+  $('bdr').classList.toggle('on',d.dr==2);$('bdr').classList.toggle('arm',d.dr==1);
+  $('bsv').classList.toggle('arm',!!d.pa);
+  if(d.sy!==undefined)$('sync').classList.toggle('on',!!d.sy);
+  if(d.s1!==undefined){direct=!d.s1;$('q1').classList.toggle('on',direct);$('q1t').textContent=direct?'Direct On':'Direct Off'}
+  if(d.v!==undefined){$('ver').textContent='Version #'+d.v;if(verLoc!==d.v){verLoc=d.v;afficheMaj()}}
  }}
 conn();
+// on / off
+$('pwr').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('o'+(on?1:0))});
 // lampes
-function sendPads(){snd('p'+pads)}
+function showPads(){document.querySelectorAll('.pad').forEach(function(q){var b=q.dataset.l=='all'?15:(1<<+q.dataset.l);q.classList.toggle('on',(pads&b)==b)})}
 document.querySelectorAll('.pad').forEach(function(p){
  var bit=p.dataset.l=='all'?15:(1<<+p.dataset.l);
- function show(){document.querySelectorAll('.pad').forEach(function(q){var b=q.dataset.l=='all'?15:(1<<+q.dataset.l);q.classList.toggle('on',(pads&b)==b)})}
  p.addEventListener('pointerdown',function(e){e.preventDefault();p.setPointerCapture(e.pointerId);
-  if(hold){pads=((pads&bit)==bit)?(pads&~bit):(pads|bit)}else pads|=bit;show();sendPads()});
- function up(){if(!hold){pads&=~bit;show();sendPads()}}
+  if(hold){pads=((pads&bit)==bit)?(pads&~bit):(pads|bit)}else pads|=bit;showPads();snd('p'+pads)});
+ function up(){if(!hold){pads&=~bit;showPads();snd('p'+pads)}}
  p.addEventListener('pointerup',up);p.addEventListener('pointercancel',up)});
-document.getElementById('hold').addEventListener('click',function(){hold=!hold;this.classList.toggle('on',hold);if(!hold){pads=0;document.querySelectorAll('.pad').forEach(function(q){q.classList.remove('on')});sendPads()}});
-document.getElementById('sync').addEventListener('click',function(){var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('y'+(on?1:0))});
-document.getElementById('q1').addEventListener('click',function(){var on=!this.classList.contains('on');this.classList.toggle('on',on);document.getElementById('q1t').textContent=on?'Sur le 1':'En direct';snd('q'+(on?1:0))});
-// mise a jour : le navigateur telecharge la derniere version sur GitHub et l'envoie au phare
+$('hold').addEventListener('pointerdown',function(e){e.preventDefault();hold=!hold;this.classList.toggle('on',hold);if(!hold){pads=0;showPads();snd('p0')}});
+$('sync').addEventListener('pointerdown',function(e){e.preventDefault();var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('y'+(on?1:0))});
+$('q1').addEventListener('pointerdown',function(e){e.preventDefault();direct=!direct;this.classList.toggle('on',direct);$('q1t').textContent=direct?'Direct On':'Direct Off';snd('q'+(direct?0:1))});
+// fader main
+(function(){var el=$('main'),k=el.querySelector('.k'),on=false,v=0;
+ for(var i=1;i<10;i++){var t=document.createElement('div');t.className='tick';t.style.top=(i*10)+'%';el.insertBefore(t,k)}
+ function pos(x){k.style.top='calc(24px + '+((1-x)*100)+'% - '+((1-x)*48)+'px)'}pos(0);
+ function mv(e){var r=el.getBoundingClientRect();v=1-(e.clientY-r.top-24)/(r.height-48);v=Math.max(0,Math.min(1,v));pos(v);thr('m','m'+Math.round(v*1000))}
+ el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);on=true;el.classList.add('act');mv(e)});
+ el.addEventListener('pointermove',function(e){if(on)mv(e)});
+ function up(){if(!on)return;on=false;el.classList.remove('act');pos(0);setTimeout(function(){snd('m-')},40)}
+ el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
+ setInterval(function(){if(on)snd('m'+Math.round(v*1000))},500)})();
+// boutons VJ : reaction immediate a l'ecran
+document.querySelectorAll('.vj .key').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();press(b);
+ var c=b.dataset.b;snd(c=='t'?'t':'b'+c);
+ if(c=='1'){b.classList.add('on');var x=$('mtx').textContent;var n=x?Math.min(16,parseInt(x.slice(1))*2):1;$('mtx').textContent='×'+n}
+ if(c=='2')b.classList.add(direct?'on':'arm');
+ if(c=='3'&&!direct)b.classList.add('arm');
+ if(c=='t'){b.classList.add('on');setTimeout(function(){b.classList.remove('on')},120)}})});
+// faders horizontaux
+function setH(k,v){var el=document.querySelector('.hf[data-k="'+k+'"]');if(!el)return;var w=el.clientWidth-36,p=v/255;el.querySelector('.f').style.width=(4+p*w)+'px';el.querySelector('.k').style.left=(18+p*w)+'px'}
+document.querySelectorAll('.hf').forEach(function(el){var k=el.dataset.k;
+ function mv(e){var r=el.getBoundingClientRect(),v=Math.round(Math.max(0,Math.min(1,(e.clientX-r.left-18)/(r.width-36)))*255);if(k=='br')v=Math.max(1,v);setH(k,v);thr(k,k+v)}
+ el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);drag[k]=1;mv(e)});
+ el.addEventListener('pointermove',function(e){if(drag[k])mv(e)});
+ function up(){setTimeout(function(){drag[k]=0},400)}
+ el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up)});
+window.addEventListener('resize',function(){});
+// effets (tuiles) : changent tout de suite, ou s'arment jusqu'au prochain 1
+function marqueTuile(){document.querySelectorAll('.tile').forEach(function(t){t.classList.toggle('cur',t.dataset.fx==cur);t.classList.toggle('arm',t.dataset.fx==armFx)})}
+fetch('/presets.json').then(function(r){return r.json()}).then(function(p){var t=$('tiles');
+ Object.keys(p).map(Number).filter(function(i){return i>0&&p[i]&&p[i].n&&p[i].seg}).sort(function(a,b){return p[a].n.localeCompare(p[b].n)}).forEach(function(i){
+  var fx=p[i].seg[0].fx,m=p[i].n.match(/^\d+\s+(NS|S|VJ)?\s*(.*)$/);
+  var d=document.createElement('div');d.className='tile';d.dataset.fx=fx;
+  d.innerHTML='<span class="led"></span><span class="tag">'+(m&&m[1]?(m[1]=='VJ'?'AUTO':m[1]):'')+'</span>'+(m&&m[2]?m[2]:p[i].n);
+  if(m&&m[1]=='VJ')d.lastChild.textContent='VJ auto';
+  d.addEventListener('pointerdown',function(e){e.preventDefault();press(d);snd('f'+fx);if(direct){cur=fx;armFx=-1}else armFx=fx;marqueTuile()});t.appendChild(d)});marqueTuile()}).catch(function(){});
+// mise a jour du firmware : le navigateur telecharge la derniere version sur GitHub et l'envoie au phare
 var SRC='https://raw.githubusercontent.com/gazelita/WLED/punto1-firmware/',verLoc=null,verNet=null,majEnCours=false;
-function msgMaj(t){document.getElementById('majmsg').textContent=t}
+function msgMaj(t){$('majmsg').textContent=t}
 function verifMaj(){fetch(SRC+'version.txt?t='+Date.now(),{cache:'no-store'}).then(function(r){return r.text()}).then(function(t){verNet=parseInt(t);afficheMaj()}).catch(function(){})}
-function afficheMaj(){if(majEnCours||verNet==null||verLoc==null)return;var b=document.getElementById('bmaj');
- if(verNet>verLoc){b.textContent='Installer #'+verNet;b.classList.add('mt','on');msgMaj('Nouvelle version disponible')}else{b.textContent='Vérifier';b.classList.remove('mt','on');msgMaj('À jour')}}
+function afficheMaj(){if(majEnCours||verNet==null||verLoc==null)return;var b=$('bmaj');
+ if(verNet>verLoc){b.lastChild.textContent='Installer #'+verNet;b.classList.add('on');msgMaj('Nouvelle version disponible')}else{b.lastChild.textContent='Vérifier';b.classList.remove('on');msgMaj('À jour')}}
 verifMaj();
-document.getElementById('bmaj').addEventListener('click',function(){
+$('bmaj').addEventListener('click',function(){
  if(majEnCours)return;
  if(!(verNet>verLoc)){msgMaj('Recherche…');verifMaj();return}
  majEnCours=true;msgMaj('Téléchargement de la version #'+verNet+'…');
@@ -2852,32 +2978,7 @@ document.getElementById('bmaj').addEventListener('click',function(){
   var fd=new FormData();fd.append('update',bin,'firmware.bin');
   return fetch('/update',{method:'POST',body:fd}).then(function(r){return r.text().then(function(t){if(!r.ok||/failed|denied/i.test(t))throw t})})
  }).then(function(){msgMaj('Installé ! Le phare redémarre…');setTimeout(function(){location.reload()},20000)})
- .catch(function(e){majEnCours=false;msgMaj('Échec de la mise à jour'+(typeof e=='string'&&e.indexOf('subnet')<0&&e.indexOf('locked')<0?'':' (vérifie le verrou OTA dans Security & Updates)'))})});
-// fader main
-(function(){var el=document.getElementById('main'),k=el.querySelector('.k'),on=false;
- function mv(e){var r=el.getBoundingClientRect(),v=1-(e.clientY-r.top)/r.height;v=Math.max(0,Math.min(1,v));k.style.top=((1-v)*100)+'%';thr('m','m'+Math.round(v*1000))}
- el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);on=true;el.classList.add('act');mv(e)});
- el.addEventListener('pointermove',function(e){if(on)mv(e)});
- function up(){if(!on)return;on=false;el.classList.remove('act');k.style.top='100%';setTimeout(function(){snd('m-')},40)}
- el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
- setInterval(function(){if(on)snd('m'+Math.round((1-parseFloat(k.style.top)/100)*1000))},500)})();
-// boutons
-document.querySelectorAll('.b[data-b]').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();b.classList.add('on');snd(b.dataset.b=='t'?'t':'b'+b.dataset.b)});
- ['pointerup','pointercancel','pointerleave'].forEach(function(ev){b.addEventListener(ev,function(){b.classList.remove('on')})})});
-// faders horizontaux
-function setH(k,v){var el=document.querySelector('.hf[data-k="'+k+'"]');if(!el)return;var p=v/255*100;el.querySelector('.f').style.width=p+'%';el.querySelector('.k').style.left=p+'%';vals[k]=v}
-document.querySelectorAll('.hf').forEach(function(el){var k=el.dataset.k;
- function mv(e){var r=el.getBoundingClientRect(),v=Math.round(Math.max(0,Math.min(1,(e.clientX-r.left)/r.width))*255);if(k=='br')v=Math.max(1,v);setH(k,v);thr(k,k+v)}
- el.addEventListener('pointerdown',function(e){e.preventDefault();el.setPointerCapture(e.pointerId);drag[k]=1;mv(e)});
- el.addEventListener('pointermove',function(e){if(drag[k])mv(e)});
- function up(){setTimeout(function(){drag[k]=0},400)}
- el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up)});
-// favoris
-fetch('/presets.json').then(function(r){return r.json()}).then(function(p){var t=document.getElementById('tiles');
- Object.keys(p).map(Number).filter(function(i){return i>0&&p[i]&&p[i].n&&!p[i].phare}).sort(function(a,b){return p[a].n.localeCompare(p[b].n)}).forEach(function(i){
-  var fx=p[i].seg&&p[i].seg[0]?p[i].seg[0].fx:-1;
-  var d=document.createElement('div');d.className='tile';d.dataset.id=i;d.dataset.fx=fx;d.textContent=p[i].n.replace(/^\d+\s+(NS|S)?\s*/,'');
-  d.addEventListener('click',function(){if(fx>=0)snd('f'+fx);else fetch('/json/state',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ps:i})})});t.appendChild(d)})}).catch(function(){});
+ .catch(function(e){majEnCours=false;msgMaj('Échec de la mise à jour (vérifie que « OTA lock » est décoché dans Security & Updates)')})});
 </script></body></html>
 )=====";
 
@@ -2888,6 +2989,7 @@ static AsyncWebSocket phareWs("/phws");
 static uint8_t phareIdVJ = 255;
 static volatile int16_t phareSetSx = -1, phareSetIx = -1, phareSetC1 = -1, phareSetBri = -1, phareSetSens = -1;
 static uint32_t phareSensChange = 0;
+static volatile int8_t phareSetOn = -1;
 static volatile int16_t phareSetFx = -1; static uint32_t phareFxMesure = 0;
 
 static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEventType type, void* arg, uint8_t* data, size_t len) {
@@ -2903,6 +3005,7 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
       else phareCmd = (uint8_t)atoi(m + 1);                             // 1 montee, 2 drop, 3 suivant
       break;
     case 't': phareTapNow(); break;
+    case 'o': phareSetOn = m[1] == '1'; break;                                         // on / off general
     case 'y': phareSync = m[1] == '1'; phareSensChange = millis(); break;               // Sync general
     case 'q': phareSurLe1 = m[1] == '1'; break;                                         // En direct / Sur le 1
     case 'f': phareSetFx = constrain(atoi(m + 1), 0, 254); phareFxMesure = phareMesureN; break;   // changer d'effet
@@ -3024,6 +3127,7 @@ class UserFxUsermod : public Usermod {
       seg.setMode(phareSetFx, true); strip.setTransition(tr);
       phareSetFx = -1; stateUpdated(CALL_MODE_DIRECT_CHANGE);
     }
+    if (phareSetOn >= 0) { if ((bri > 0) != (phareSetOn == 1)) { toggleOnOff(); stateUpdated(CALL_MODE_BUTTON); } phareSetOn = -1; }
     static uint32_t briT = 0;
     if (phareSetBri >= 0 && millis() - briT > 80) { bri = phareSetBri; phareSetBri = -1; briT = millis(); stateUpdated(CALL_MODE_DIRECT_CHANGE); }
     // etat envoye a la page, 10 fois par seconde
@@ -3033,10 +3137,11 @@ class UserFxUsermod : public Usermod {
       char nom[40] = ""; const char* d = strip.getModeData(seg.mode);
       unsigned i = 0; while (i < sizeof(nom) - 1) { char ch = pgm_read_byte(d + i); if (!ch || ch == '@') break; nom[i++] = (ch == '"' || ch == '\\') ? ' ' : ch; } nom[i] = 0;
       char buf[380];
-      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d}",
+      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"on\":%d,\"lv\":%d,\"l\":[%d,%d,%d,%d],\"pf\":%d,\"pa\":%d}",
                phareCale() ? (int)(phareBpm() + 0.5f) : 0, T.kickFlash != kickVu ? 1 : 0, vj ? 1 : 0, nom,
                seg.speed, seg.intensity, seg.custom1, phareSens, bri, seg.mode,
-               DR.etat == 1 ? DR.vitesse : 0, DR.etat >= 2 ? 1 : 0, phareSync ? 1 : 0, phareSurLe1 ? 1 : 0, PHARE_BUILD);
+               DR.etat == 1 ? DR.vitesse : 0, DR.etat == 2 ? 1 : (DR.etat == 3 ? 2 : 0), phareSync ? 1 : 0, phareSurLe1 ? 1 : 0, PHARE_BUILD, bri > 0 ? 1 : 0, (int)constrain(phareVol, 0.0f, 255.0f),
+               bri ? phareSortie[0] : 0, bri ? phareSortie[1] : 0, bri ? phareSortie[2] : 0, bri ? phareSortie[3] : 0, phareSetFx >= 0 ? 1 : 0, DR.suivantAttente ? 1 : 0);
       kickVu = T.kickFlash;
       phareWs.textAll(buf);
     }
