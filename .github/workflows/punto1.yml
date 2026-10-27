@@ -18,7 +18,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: pip install -r requirements.txt
-      - run: pio run -e punto1 2>&1 | tee build.log
+      - run: PHARE_SHA=$(git rev-parse --short=7 HEAD) pio run -e punto1 2>&1 | tee build.log
         env:
           PHARE_BUILD: ${{ github.run_number }}
       - name: Diagnostic
