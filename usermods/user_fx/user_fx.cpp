@@ -1470,6 +1470,9 @@ static void phareNoir(bool manuel)   { DR.etat = 2; DR.manuel = manuel; DR.t = m
 static void phareFlashs(uint8_t nb)  { DR.duo = false; DR.etat = 3; DR.t = millis(); DR.flashs = 0; DR.total = nb; DR.kickVu = T.kickFlash; DR.flashT = 0; }
 // le drop tombe maintenant : 1er flash tout de suite, puis un par kick (4 ou 8 en tout)
 static bool phareApresDrop = false;          // un drop manuel vient de se terminer : enchainer All bass / Artifice
+static uint32_t phareVJVu = 0;               // derniere image jouee par le VJ
+static uint8_t phareApresVJ = 0;             // 1 : Artifice 8 mesures ; 2 : All bass 4 + Artifice 4 (joue par le VJ)
+static uint32_t phareApresDebut = 0;
 static bool phareDropManuel = false;
 static void phareDropMaintenant()   { phareFlashs(4); DR.duo = false; DR.flashs = 1; DR.flashT = millis(); DR.kickVu = T.lastTick; }
 
@@ -1524,7 +1527,9 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
       } else if (T.kickFlash != DR.kickVu && T.kickFlash >= DR.t && (DR.flashs == 0 || T.kickFlash > DR.flashT + (uint32_t)(T.period * 0.5f))) {
         DR.kickVu = T.kickFlash; DR.flashs++; DR.flashT = max(T.kickFlash, DR.flashT);   // pas de tempo : sur les kicks entendus
       } else if (DR.flashs > 0 && now - DR.flashT >= T.period) { DR.flashs++; DR.flashT += (uint32_t)T.period; }
-      if (DR.flashs > DR.total || (DR.flashs == 0 && now - DR.t > 3000)) { DR.etat = 0; DR.fin = now; if (phareDropManuel) { phareDropManuel = false; phareApresDrop = true; } }
+      if (DR.flashs > DR.total || (DR.flashs == 0 && now - DR.t > 3000)) { DR.etat = 0; DR.fin = now; if (phareDropManuel) { phareDropManuel = false;
+        if (now - phareVJVu < 300) { phareApresVJ = hw_random8() < 128 ? 1 : 2; phareApresDebut = phareMesureN; }   // VJ : il enchaine lui-meme
+        else phareApresDrop = true; } }
       break;
   }
   (void)vol;
@@ -1745,7 +1750,11 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   float dt = min(100.0f, (float)(now - prec)); prec = now;
   float lv[PHARE_MAX];
   if (!Rd.vj && phareOverride && !phareExpo) Rd.couches = 1.0f;   // Override : aussi sur les effets musicaux
-  for (unsigned i = 0; i < n; i++) lv[i] = max(lv0[i], veilleuse / 255.0f) * Rd.gain;
+  // son coupe : extinction en 0,3 s apres 0,3 s de silence (sauf ambiances Expo)
+  static float gainSilence = 1.0f;
+  bool coupe = !phareExpo && now - T.silenceDepuis > 300;
+  gainSilence = coupe ? max(0.0f, gainSilence - dt / 300.0f) : min(1.0f, gainSilence + dt / 120.0f);
+  for (unsigned i = 0; i < n; i++) lv[i] = max(lv0[i], veilleuse / 255.0f) * Rd.gain * gainSilence;
   // douceur (VJ) / mode calme : le fond devient une veilleuse, montees et descentes progressives
   float dou = Rd.calme ? max(Rd.douceur, 0.8f) : Rd.douceur;
   float tau = 15.0f + dou * dou * 700.0f;
@@ -2665,8 +2674,9 @@ static void mode_phare_dj(void) {
   float sens = SEGMENT.intensity / 255.0f;                  // proximite au beat : force des couches kick / chick / hi-hats
   float douceur = SEGMENT.custom1 / 255.0f;                // clignote (0) <-> veilleuse (1)
   int8_t vitesse = ((int)SEGMENT.speed - 128) / 2;          // plus calme <-> plus rapide
-  bool silence = now - T.silenceDepuis > 1500;
+  bool silence = now - T.silenceDepuis > 300;
   bool kick = phareKickActif();
+  phareVJVu = now;
   phareDropAuto();                                          // montee / drop automatiques
 
   // --- ambiance ---
@@ -2749,6 +2759,15 @@ static void mode_phare_dj(void) {
   Rd.max3 = true;
   Rd.douceur = douceur;
   Rd.calme = d->cat == 2;
+  // apres un drop manuel : le VJ enchaine Artifice (8 mesures) ou All bass (4) puis Artifice (4), puis reprend
+  if (phareApresVJ) {
+    static const PhareChoix art = {mode_phare_artifice, 200, 150, 0, 30, false, false}, all = {mode_phare_allbass, 200, 128, 0, 30, false, false};
+    static const PhareChoix* joue = nullptr;
+    uint32_t m = phareMesureN - phareApresDebut;
+    const PhareChoix* c = (phareApresVJ == 2 && m < 4) ? &all : &art;
+    if (m >= 8) { phareApresVJ = 0; joue = nullptr; phareSuivantDemande = true; }   // le VJ reprend avec un nouvel effet
+    else { bool neuf = c != joue; joue = c; Rd.max3 = false; phareJoue(*c, neuf, 0); return; }
+  }
   phareJoue(cats[d->cat][d->idx], change, d->cat <= 1 ? 0 : vitesse);
 }
 static const char _data_FX_MODE_PHARE_DJ[] PROGMEM = "0 VJ auto@Calme / rapide,Proximite au beat,Clignote / veilleuse;!;;1f;sx=128,ix=170,c1=60";
@@ -2888,7 +2907,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .maj{display:flex;align-items:center;justify-content:space-between;gap:12px}
 .maj .key{height:44px;padding:0 16px;flex-direction:row}
 .maj .msg{color:var(--mu);font-size:11px;margin-top:6px}
-.off{position:fixed;left:0;right:0;bottom:0;background:#2a0f0a;color:#ffb3a6;text-align:center;padding:9px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;display:none}
+.bandeau{position:fixed;left:0;right:0;bottom:0;background:#2a0f0a;color:#ffb3a6;text-align:center;padding:9px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;display:none}
 @media(max-width:560px){.r2{grid-template-columns:auto auto auto 1fr}.vj .key{height:84px}
  .meter{grid-column:1/-1}.mbox{flex-direction:row;align-items:center}.dots{grid-template-rows:none;grid-template-columns:repeat(22,1fr);height:auto;flex:1}.lamps{grid-template-rows:none;grid-template-columns:repeat(4,1fr);height:36px;width:84px;padding:0}.lamps i{width:100%;height:30px}.lamps{gap:6px;height:auto;width:110px;flex:none}.vf.vs{height:96px!important;width:44px!important;flex:none}.mbox .dots{flex:1 1 auto;min-width:0;gap:3px;grid-template-columns:repeat(22,minmax(0,1fr))!important;padding:6px}.dots i{width:100%;height:auto;aspect-ratio:1;max-width:8px}.meter .cap+.mbox+.cap{display:none}}
 @media(max-width:430px){.logo b{font-size:18px;letter-spacing:.18em}.logo svg{width:24px}.gear,.pwr{width:40px;height:40px}.lcd{padding:6px 9px}.lcd b{font-size:19px;min-width:36px}.pads{grid-template-rows:repeat(4,52px) 38px;width:52px}.vf{width:50px;height:306px}.vf.vb{width:40px}.vj .key,.vj .key.mini{height:62px;font-size:9px;letter-spacing:.1em}.mtrow{grid-template-columns:1fr 1fr}.mtrow .key:first-child{grid-column:1/-1}.mod{padding:8px}.row{gap:7px}}
@@ -2910,10 +2929,119 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .sheet .num{font:600 20px/1 ui-monospace,"SF Mono",Menlo,monospace;min-width:70px;text-align:center}
 .sheet .key{height:44px;min-width:56px;padding:0 14px;flex-direction:row}
 .ms{font:600 13px ui-monospace,"SF Mono",Menlo,monospace;color:var(--led)}
+
+/* ================= DA Y2K : chrome liquide, plastique moule, plasma orange ================= */
+:root{--bg:#090607;--bord:#580E13;--rouge:#E52B20;--org:#FF6A00;--org2:#FF9B27;--champ:#C9A49A;--led:#FF6A00;--tx:#fff3ea;--mu:#c98a6a;--alu2:#e9c3b0;--bpm:.5s}
+html,body{background:var(--bg);color:var(--tx)}
+body{background:radial-gradient(ellipse 80% 50% at 15% 0%,#5a1208 0%,transparent 60%),radial-gradient(ellipse 70% 60% at 100% 100%,#4a0c06 0%,transparent 60%),radial-gradient(ellipse at 50% 40%,#1c0705,#090607 75%) fixed}
+body:before{content:"";position:fixed;inset:-30%;z-index:-1;background:conic-gradient(from 0deg at 50% 50%,#ff6a0000,#ff6a0018,#e52b2010,#ff9b2714,#ff6a0000);filter:blur(60px);animation:plasma 40s linear infinite;pointer-events:none}
+@keyframes plasma{to{transform:rotate(360deg)}}
+.cap{color:var(--org2);text-shadow:0 0 6px #ff6a0066}
+/* entete */
+.top{position:relative;padding:4px 2px 10px}
+.logo{gap:6px;position:relative}
+.logo .pico{display:none}
+.logo svg.car{width:150px;height:78px;flex:none;filter:drop-shadow(0 6px 10px #000) drop-shadow(0 0 12px #ff6a0040);margin:-6px -4px -8px -6px}
+.titre b{font:900 italic 30px/1 "Arial Black","Helvetica Neue",system-ui,sans-serif;letter-spacing:.06em;background:linear-gradient(180deg,#ffe3c2 0%,#ff9b27 35%,#e52b20 60%,#7a1008 100%);-webkit-background-clip:text;background-clip:text;color:transparent;filter:drop-shadow(0 1px 0 #2a0503) drop-shadow(0 0 8px #ff6a0055);-webkit-text-stroke:.5px #ffd0a0}
+.fx{color:var(--org2);text-shadow:0 0 6px #ff6a0055;margin-left:10px}
+.lcd{background:radial-gradient(ellipse at 50% 0%,#2a0a06,#0a0302 70%);border:2px solid #000;border-radius:22px 14px 22px 14px;box-shadow:0 0 0 2px #c9a49a55,inset 0 2px 10px #000,inset 0 -1px 0 #ff6a0033,0 6px 14px #000}
+.lcd b{font:italic 700 26px/1 ui-monospace,"SF Mono",Menlo,monospace;color:var(--org2);text-shadow:0 0 8px #ff6a00,0 0 2px #ffd0a0;transform:skewX(-6deg)}
+.lcd b.old{color:#6a3020;text-shadow:none}
+.led{background:#3a0e08}
+.led.on{background:#ffb060;box-shadow:0 0 8px #ff6a00,0 0 2px #fff}
+.pwr,.gear{background:radial-gradient(circle at 40% 30%,#fff6f0 0%,#c9a49a 18%,#5a3a34 45%,#1a0a08 70%,#c9a49a 92%);border:2px solid #120403;box-shadow:0 6px 12px #000,inset 0 -3px 6px #000a,0 0 14px #ff6a0030}
+.pwr svg,.gear svg{stroke:#2a0a06}
+.pwr.on svg{stroke:#ff6a00;filter:drop-shadow(0 0 6px #ff6a00)}
+.gear svg{stroke:#3a120a}
+/* chassis chrome */
+.deck{background:linear-gradient(125deg,#fff4ee 0%,#9c7d76 12%,#2a1210 26%,#d9b8ad 40%,#4a2420 55%,#f2dcd3 68%,#6d4842 82%,#e6cfc6 100%);border-radius:46px 30px 52px 34px/34px 48px 30px 44px;padding:12px;box-shadow:0 24px 60px #000,0 0 40px #ff6a0026,inset 0 2px 2px #fff,inset 0 -4px 8px #0009,inset 0 0 0 1px #00000080}
+.mod{background:radial-gradient(ellipse 120% 80% at 50% 0%,#2e0d09 0%,#160605 55%,#0b0303 100%);border-radius:30px 20px 34px 22px/22px 32px 20px 30px;box-shadow:inset 0 0 0 2px #000,inset 0 4px 14px #000,inset 0 -2px 0 #ff6a0020,0 0 0 2px #c9a49a70,0 2px 0 3px #3a1a16}
+.mod>.cap:before{width:8px;height:8px;border-radius:50%;background:#ff8a2a;box-shadow:0 0 8px #ff6a00,0 0 2px #fff;opacity:1}
+.sec.mod{background:radial-gradient(ellipse at 50% 0%,#24090a,#0d0404 70%);border-radius:34px 22px 38px 24px/24px 36px 22px 32px}
+/* capsules glossy (touches) */
+.key{background:radial-gradient(ellipse 90% 70% at 50% 18%,#ff9a6a 0%,#e52b20 28%,#8a160e 66%,#3a0604 100%);border:1px solid #1a0302;border-radius:30px 22px 32px 22px/24px 32px 22px 30px;color:#fff6ee;text-shadow:0 1px 0 #3a0604,0 0 6px #ff9b2788;
+ box-shadow:inset 0 2px 1px #ffd0b0aa,inset 0 -8px 14px #000a,0 4px 0 #2a0503,0 7px 14px #000d,0 0 0 2px #c9a49a40}
+.key:after{content:"";position:absolute;left:14%;right:14%;top:5%;height:30%;border-radius:50%;background:linear-gradient(#ffffff70,#ffffff00);pointer-events:none}
+.key svg{stroke:#fff6ee;filter:drop-shadow(0 0 4px #ff9b27aa)}
+.key.press,.key:active{transform:translateY(3px);box-shadow:inset 0 2px 1px #ffd0b088,inset 0 -4px 10px #000a,0 1px 0 #2a0503,0 2px 6px #000d,0 0 0 2px #c9a49a40;background:radial-gradient(ellipse 90% 70% at 50% 25%,#ffb07a 0%,#ff4a2a 30%,#a01c12 70%,#4a0806 100%)}
+.key.on{background:radial-gradient(ellipse 90% 70% at 50% 25%,#fff0c0 0%,#ffb040 22%,#ff6a00 50%,#b02a08 85%,#5a0c04 100%);color:#2a0503;text-shadow:0 1px 0 #ffd0a0;box-shadow:inset 0 2px 1px #fff8,inset 0 -6px 12px #7a1a0488,0 4px 0 #2a0503,0 0 24px #ff6a00aa,0 0 0 2px #ffd0a0}
+.key.on svg{stroke:#2a0503;filter:none}
+.key.hot{color:#fff6ee}
+.key .led{top:9px;left:10px}
+.key.on .led,.key.arm .led{background:#fff;box-shadow:0 0 8px #fff,0 0 14px #ff6a00}
+.vj .key small{color:#ffe0b0;text-shadow:0 0 6px #ff6a00}
+.key.on small{color:#2a0503;text-shadow:none}
+.vj .key.mini{border-radius:26px 26px 30px 30px/30px 30px 26px 26px}
+#bdr{background:radial-gradient(ellipse 90% 70% at 50% 18%,#ffb070 0%,#ff4a1a 30%,#a8180c 70%,#4a0604 100%)}
+/* lampes : lentilles du feu */
+.pad{border-radius:50% 46% 48% 50%/46% 50% 46% 50%;font:900 italic 22px/1 "Arial Black",system-ui,sans-serif;color:#ffb090}
+.pad.r{background:radial-gradient(circle at 50% 30%,#a8301e 0%,#5a0e08 55%,#1a0302 100%);color:#ff8a70}
+.pad.o{background:radial-gradient(circle at 50% 30%,#b0661a 0%,#5a2a06 55%,#1a0a02 100%);color:#ffc070}
+.pad.on.r{background:radial-gradient(circle at 50% 35%,#fff0e0 0%,#ff6a50 25%,#e52b20 55%,#7a0e08 100%);color:#fff;box-shadow:inset 0 2px 1px #fff9,0 0 30px #ff2a10,0 0 0 2px #ffd0c0}
+.pad.on.o{background:radial-gradient(circle at 50% 35%,#fffbe0 0%,#ffc040 25%,#ff8a00 55%,#7a3a04 100%);color:#2a0a02;box-shadow:inset 0 2px 1px #fff9,0 0 30px #ff9b27,0 0 0 2px #ffe0b0}
+.pad.solid{border-radius:20px;font:700 10px/1 system-ui,sans-serif;letter-spacing:.18em;color:#ffd0c0;background:radial-gradient(ellipse at 50% 20%,#5a2018,#200604)}
+.pad.solid.on{background:radial-gradient(ellipse at 50% 30%,#fff,#ffd0b0 40%,#ff9b27);color:#2a0503}
+.tg{background:radial-gradient(ellipse at 50% 0%,#2a0a06,#0a0302);border:1px solid #000;border-radius:22px;box-shadow:inset 0 2px 8px #000,0 0 0 2px #c9a49a40;color:#c98a6a}
+.tg.on{color:#fff3ea}.tg.on .led{background:#ffb060;box-shadow:0 0 8px #ff6a00}
+/* faders : rails lumineux, curseurs chromes */
+.vf,.hf{background:linear-gradient(90deg,#0a0302,#1a0605 50%,#0a0302);border:2px solid #000;border-radius:30px;box-shadow:inset 0 3px 12px #000,0 0 0 2px #c9a49a55,0 2px 0 3px #2a1210}
+.vf:before,.hf:before{background:#2a0704;box-shadow:0 0 6px #ff6a0040}
+.vf .tick{background:#ff6a0030}
+.vf .k,.hf .k{background:linear-gradient(180deg,#fffaf6 0%,#e0c2b8 22%,#7a5850 48%,#2a1612 52%,#c9a49a 78%,#fff0e8 100%);border-radius:14px;box-shadow:0 5px 10px #000,0 0 0 1px #000,inset 0 1px 0 #fff,0 0 12px #ff6a0030}
+.hf .k{background:linear-gradient(90deg,#fffaf6 0%,#e0c2b8 22%,#7a5850 48%,#2a1612 52%,#c9a49a 78%,#fff0e8 100%)}
+.vf .k:after,.hf .k:after{background:#2a0a06;box-shadow:0 0 4px #ff6a00}
+.vf.act .k{background:linear-gradient(180deg,#fff6e0,#ffb060 40%,#ff6a00 60%,#ffd0a0)}
+.hf .f,.vb .fill{background:linear-gradient(90deg,#e52b20,#ff6a00,#ff9b27);box-shadow:0 0 10px #ff6a00,0 0 2px #fff}
+.vb .fill{background:linear-gradient(0deg,#e52b20,#ff6a00,#ff9b27)}
+.h .t b{color:#fff3ea;text-shadow:0 0 6px #ff6a0066}
+.h .t span{color:#ff8a5a}
+/* son */
+.dots{background:#0a0302;border-radius:14px;box-shadow:inset 0 2px 8px #000,0 0 0 1px #c9a49a40}
+.dots i{background:#2a0804}
+.dots i.on{background:#ffb060;box-shadow:0 0 6px #ff6a00}
+.dots i.on.pk{background:#fff;box-shadow:0 0 8px #ff6a00}
+.lamps i{border-radius:40%}
+/* segments (modes, reactivite) */
+.seg3{background:radial-gradient(ellipse at 50% 0%,#1e0605,#070201);border-radius:30px 22px 30px 22px;box-shadow:inset 0 2px 8px #000,0 0 0 2px #c9a49a60,0 3px 0 3px #2a1210}
+.seg3 div{border-radius:26px 18px 26px 18px;color:#c98a6a}
+.seg3 div.on{background:radial-gradient(ellipse 90% 80% at 50% 20%,#ffd0a0 0%,#ff6a00 35%,#a8200a 80%);color:#2a0503;text-shadow:0 1px 0 #ffd0a0;box-shadow:inset 0 2px 1px #fffa,0 0 18px #ff6a0088}
+.seg3 div.on .led{background:#fff;box-shadow:0 0 6px #fff}
+/* tuiles */
+.tile{background:radial-gradient(ellipse 90% 70% at 50% 15%,#5a1a10 0%,#2a0806 55%,#120302 100%);border:1px solid #000;border-radius:24px 16px 24px 16px/18px 24px 16px 24px;color:#ffc8a8;box-shadow:inset 0 1px 1px #ffb09055,inset 0 -4px 8px #0009,0 3px 0 #1a0302,0 0 0 1px #c9a49a30}
+.tile.cur{background:radial-gradient(ellipse 90% 70% at 50% 25%,#ffe0b0 0%,#ff6a00 35%,#9a1a06 85%);color:#2a0503;box-shadow:inset 0 2px 1px #fff9,0 0 18px #ff6a0099}
+.tile.cur .led{background:#fff;box-shadow:0 0 6px #fff}
+.tile.sub{box-shadow:inset 0 1px 1px #ffb09055,0 0 0 2px #ff9b27,0 0 14px #ff6a0066}
+/* feuille reglages */
+.sheet .box{background:radial-gradient(ellipse at 50% 0%,#2a0a08,#0d0403 70%);border-radius:36px 36px 0 0;box-shadow:0 -10px 40px #000,0 0 0 2px #c9a49a60}
+.prog{background:#0a0302;box-shadow:inset 0 1px 4px #000,0 0 0 1px #c9a49a40}
+.prog div{background:linear-gradient(90deg,#e52b20,#ff6a00,#ff9b27)}
+.bandeau{background:#3a0604;color:#ffd0b0}
+/* pulsation au BPM (tres legere) */
+.pulse .deck{animation:pls var(--bpm) ease-out infinite}
+@keyframes pls{0%{box-shadow:0 24px 60px #000,0 0 60px #ff6a0060,inset 0 2px 2px #fff,inset 0 -4px 8px #0009}100%{box-shadow:0 24px 60px #000,0 0 30px #ff6a0018,inset 0 2px 2px #fff,inset 0 -4px 8px #0009}}
+@media(max-width:430px){.top{flex-wrap:wrap;row-gap:6px}.logo{width:100%}.logo svg.car{width:150px;height:78px}.titre b{font-size:34px}.lcd{margin-left:0;flex:1;justify-content:center}.deck{border-radius:34px 24px 38px 26px/26px 36px 24px 32px;padding:9px}}
 </style></head><body><div class="w">
 <div class="top">
- <div class="logo"><svg viewBox="0 0 32 32"><g fill="none" stroke="#f2f1ee" stroke-width="1.6"><rect x="9" y="2" width="14" height="28" rx="4"/></g><g><circle cx="16" cy="8" r="2.6" fill="#ff3b30"/><circle cx="16" cy="14" r="2.6" fill="#ff3b30"/><circle cx="16" cy="20" r="2.6" fill="#ffa21a"/><circle cx="16" cy="26" r="2.6" fill="#ff3b30"/></g></svg>
-  <div><b>PUNTO</b></div></div>
+ <div class="logo"><svg class="car" viewBox="0 0 200 104" aria-hidden="true">
+ <defs>
+  <linearGradient id="cb" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#ff7a52"/><stop offset=".35" stop-color="#e52b20"/><stop offset=".8" stop-color="#7a1008"/><stop offset="1" stop-color="#3a0604"/></linearGradient>
+  <linearGradient id="cw" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#3a2a2a"/><stop offset=".5" stop-color="#0c0606"/><stop offset="1" stop-color="#2a1a1a"/></linearGradient>
+  <linearGradient id="cf" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#ffd23a"/><stop offset=".5" stop-color="#ff8a1a"/><stop offset="1" stop-color="#ff3a10" stop-opacity="0"/></linearGradient>
+  <radialGradient id="cr" cx=".5" cy=".5" r=".5"><stop offset="0" stop-color="#e8e1de"/><stop offset=".45" stop-color="#8e817c"/><stop offset=".7" stop-color="#2a2222"/><stop offset="1" stop-color="#0a0606"/></radialGradient>
+  <radialGradient id="cx" cx="0" cy=".5" r="1"><stop offset="0" stop-color="#bfe4ff"/><stop offset=".3" stop-color="#ff9b27"/><stop offset="1" stop-color="#ff3a10" stop-opacity="0"/></radialGradient>
+ </defs>
+ <ellipse cx="104" cy="92" rx="84" ry="7" fill="#000" opacity=".55"/>
+ <path d="M10 70 C10 58 18 52 30 50 L58 46 C70 30 86 22 108 21 L140 21 C156 22 170 30 182 44 L190 54 C194 60 194 70 190 76 L184 80 L22 82 C14 82 10 78 10 70Z" fill="url(#cb)" stroke="#2a0503" stroke-width="1.5"/>
+ <path d="M64 46 C74 33 88 27 106 26 L120 26 L118 46Z" fill="url(#cw)"/>
+ <path d="M124 26 L142 26 C154 27 164 33 174 44 L172 47 L124 46Z" fill="url(#cw)"/>
+ <path d="M26 54 C40 50 60 48 80 50" stroke="#ffd6c0" stroke-width="1.6" fill="none" opacity=".7"/>
+ <path d="M60 66 C74 58 84 62 92 56 C88 64 100 62 108 56 C104 66 118 64 126 58 C122 68 138 66 150 60 C140 72 110 74 70 72 Z" fill="url(#cf)" opacity=".95"/>
+ <rect x="178" y="56" width="8" height="10" rx="2" fill="#ffb02e"/>
+ <circle cx="52" cy="80" r="15" fill="#0a0606"/><circle cx="52" cy="80" r="11" fill="url(#cr)"/>
+ <circle cx="156" cy="80" r="15" fill="#0a0606"/><circle cx="156" cy="80" r="11" fill="url(#cr)"/>
+ <ellipse cx="0" cy="76" rx="22" ry="7" fill="url(#cx)" transform="translate(6 0)"/>
+</svg><svg class="pico" viewBox="0 0 32 32"><g fill="none" stroke="#f2f1ee" stroke-width="1.6"><rect x="9" y="2" width="14" height="28" rx="4"/></g><g><circle cx="16" cy="8" r="2.6" fill="#ff3b30"/><circle cx="16" cy="14" r="2.6" fill="#ff3b30"/><circle cx="16" cy="20" r="2.6" fill="#ffa21a"/><circle cx="16" cy="26" r="2.6" fill="#ff3b30"/></g></svg>
+  <div class="titre"><b>PUNTO</b></div></div>
  <div class="lcd"><span class="led" id="dot"></span><b id="bpm">---</b><span class="cap">bpm</span></div>
  <div class="gear" id="gear"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1 7 17M17 7l2.1-2.1"/></svg></div>
  <div class="pwr on" id="pwr"><svg viewBox="0 0 24 24" fill="none" stroke-width="2.2" stroke-linecap="round"><path d="M12 3v8"/><path d="M6.3 6.6a8 8 0 1 0 11.4 0"/></svg></div>
@@ -2965,7 +3093,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
  <div class="maj" style="margin-top:8px"><span id="ver" class="cap" style="color:var(--alu2)">Version …</span><div class="key" id="bmaj"><span class="led"></span>Vérifier</div></div><div class="prog" id="barre" style="display:none"><div></div></div><div class="msg" id="majmsg"></div>
  <div class="key" id="fermer" style="margin-top:18px;height:46px">Fermer</div>
 </div></div>
-</div><div class="off" id="off">Connexion au phare…</div>
+</div><div class="bandeau" id="off">Connexion au phare…</div>
 <script>
 var vjId=-2;
 function propre(n){return n.replace(/^\d+\s+(Soiree|Expo)\s+/,'').replace(/^0\s+/,'')}
@@ -2985,6 +3113,7 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
  ws.onclose=function(){$('off').style.display='block';setTimeout(conn,1200)};
  ws.onmessage=function(e){try{var d=JSON.parse(e.data)}catch(x){return}
   if(d.z){$('rtt').textContent=(Date.now()-pingT)+' ms';return}
+  if(d.b&&d.bc){document.documentElement.style.setProperty('--bpm',(60/d.b).toFixed(3)+'s');document.body.classList.add('pulse')}else document.body.classList.remove('pulse');
   $('bpm').textContent=d.b?d.b:'---';$('bpm').classList.toggle('old',!d.bc);
   if(d.k){var t=$('dot');t.classList.add('on');setTimeout(function(){t.classList.remove('on')},90)}
   if(d.fx!==undefined)$('fx').textContent=propre(d.fx)+(d.vn?'  ›  '+propre(d.vn):'');
@@ -3060,7 +3189,7 @@ $('bflash').addEventListener('click',function(){snd('x')});
  function up(){if(!on)return;on=false;el.classList.remove('act');pos(0);setTimeout(function(){snd('m-')},40)}
  el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
  setInterval(function(){if(on)snd('m'+Math.round(v*1000))},500)})();
-function offEtat(o){$('boff').classList.toggle('on',o);$('boff').classList.toggle('off',o);$('offt').textContent=o?'On':'Off'}
+function offEtat(o){$('boff').classList.toggle('on',o);$('boff').classList.toggle('eteint',o);$('offt').textContent=o?'On':'Off'}
 function monteeStop(){$('bmt').classList.remove('on');$('mtx').textContent=''}
 // boutons VJ : reaction immediate a l'ecran
 document.querySelectorAll('.vj .key').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();press(b);
@@ -3156,6 +3285,29 @@ static uint8_t phareAjoute(void (*fx)(), const char* data, uint8_t id = 255) {
 }
 static int phareIdDe(void (*fx)()) { for (uint8_t i = 0; i < phareRegN; i++) if (phareRegFx[i] == fx) return phareRegId[i]; return -1; }
 static float phareBpmVu = 0;
+// liste des effets visibles, triee par nom (pour "Suivant" en Manuel / Expo)
+static uint8_t phareListe[48]; static uint8_t phareListeN = 0;
+static void phareListeFaire(const char* const* nos, unsigned nb) {
+  phareListeN = 0;
+  for (uint8_t i = 0; i < phareRegN; i++) {
+    const char* d = strip.getModeData(phareRegId[i]); bool vis = false;
+    for (unsigned k = 0; k < nb; k++) if (nos[k] == d) vis = true;
+    if (vis && phareListeN < 48) phareListe[phareListeN++] = phareRegId[i];
+  }
+  for (uint8_t a = 1; a < phareListeN; a++) for (uint8_t b = a; b > 0 && strcmp_P(strip.getModeData(phareListe[b - 1]), strip.getModeData(phareListe[b])) > 0; b--) {
+    uint8_t t = phareListe[b]; phareListe[b] = phareListe[b - 1]; phareListe[b - 1] = t;
+  }
+}
+static int phareSuivantDe(uint8_t id) {           // effet suivant de la meme famille (Soiree / Expo)
+  char fam = pgm_read_byte(strip.getModeData(id));
+  int pos = -1; for (uint8_t i = 0; i < phareListeN; i++) if (phareListe[i] == id) pos = i;
+  if (pos < 0) return -1;
+  for (uint8_t k = 1; k <= phareListeN; k++) {
+    uint8_t c = phareListe[(pos + k) % phareListeN];
+    if (pgm_read_byte(strip.getModeData(c)) == fam && c != phareIdVJ) return c;
+  }
+  return -1;
+}
 static volatile int16_t phareSetSx = -1, phareSetIx = -1, phareSetC1 = -1, phareSetBri = -1, phareSetSens = -1;
 static uint32_t phareSensChange = 0;
 static volatile int8_t phareSetOn = -1;
@@ -3282,6 +3434,7 @@ class UserFxUsermod : public Usermod {
     }
     static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_ALLBASS, _data_FX_MODE_PHARE_GRADIENT, _data_FX_MODE_PHARE_DUOS, _data_FX_MODE_PHARE_BATTERIE, _data_FX_MODE_PHARE_QUESTION, _data_FX_MODE_PHARE_RICOCHET, _data_FX_MODE_PHARE_SCINTILLEMENT, _data_FX_MODE_PHARE_NOTES};
     phareMasquerNatifs(nos, sizeof(nos) / sizeof(nos[0]));
+    phareListeFaire(nos, sizeof(nos) / sizeof(nos[0]));
 
     // use id=255 for all custom user FX (the final id is assigned when adding the effect)
 
@@ -3354,6 +3507,8 @@ class UserFxUsermod : public Usermod {
     if (phareFlashTest && millis() - phareFlashTest > 150) { phareFlashTest = 0; pharePads = 0; }
     // effet Expo (ambiance fixe) : jamais calé sur le son
     { const char* d = strip.getModeData(seg.mode); phareExpo = strncmp_P("2 Expo", d, 6) == 0; }
+    // Suivant hors VJ : effet suivant de la liste (Soiree en Manuel, Expo en Expo)
+    if (phareSuivantDemande && seg.mode != phareIdVJ) { phareSuivantDemande = false; int s2 = phareSuivantDe(seg.mode); if (s2 >= 0) phareSetFx = s2; }
     // reglages de l'effet envoyes par la page
     for (int i = 0; i < 8; i++) if (phareSetK[i] >= 0) {
       uint8_t v = (uint8_t)phareSetK[i]; phareSetK[i] = -1;
