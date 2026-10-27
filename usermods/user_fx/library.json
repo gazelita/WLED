@@ -1,4 +1,10 @@
 {
   "name": "user_fx",
-  "build": { "libArchive": false }
+  "build": { "libArchive": false },
+  "dependencies": [
+    { "name": "WiFiClientSecure", "platforms": "espressif32" },
+    { "name": "HTTPClient", "platforms": "espressif32" },
+    { "name": "HTTPUpdate", "platforms": "espressif32" },
+    { "name": "Update", "platforms": "espressif32" }
+  ]
 }
