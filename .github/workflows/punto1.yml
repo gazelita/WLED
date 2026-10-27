@@ -36,12 +36,9 @@ jobs:
           path: .pio/build/punto1/firmware.bin
       - name: Publier pour la mise a jour automatique
         if: github.ref == 'refs/heads/punto1'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
         run: |
           test -f .pio/build/punto1/firmware.bin
-          echo ${{ github.run_number }} > version.txt
-          gh release view punto1-latest >/dev/null 2>&1 || gh release create punto1-latest --title "Phare punto1" --notes "Firmware du phare, mis a jour a chaque compilation" --target punto1
-          gh release upload punto1-latest .pio/build/punto1/firmware.bin version.txt --clobber
-          gh release edit punto1-latest --title "Phare punto1 #${{ github.run_number }}"
+          mkdir pub && cp .pio/build/punto1/firmware.bin pub/ && echo ${{ github.run_number }} > pub/version.txt
+          cd pub && git init -q && git checkout -q -b punto1-firmware && git add .
+          git -c user.name=phare-ci -c user.email=ci@phare commit -qm "firmware #${{ github.run_number }}"
+          git push -qf https://x-access-token:${{ github.token }}@github.com/${{ github.repository }} punto1-firmware
