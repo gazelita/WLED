@@ -1361,6 +1361,7 @@ struct PhareOrch {
   bool    noirFin = false;   // un temps de noir juste avant la phrase suivante
   int8_t  mesureVide = -1;   // une mesure presque vide (numero de mesure dans la phrase)
   uint8_t fill = 0;          // fill a la 8e mesure : 0 aucun, 1 roll, 2 stroboscope
+  uint8_t perm = 0;          // lampes de l'effet : 0 telles quelles, 1 inversees (haut/bas), 2 decalees de 2
   float   niveau = 1.0f;     // contraste couplet / refrain (0,4 a 1)
 };
 static PhareOrch O;
@@ -1413,11 +1414,7 @@ static void phareCouches(float* lv, unsigned n) {
     if (Rd.calme) { lv[p] = max(lv[p], e); return; }                                              // calme : 1 seule lampe, rien d'autre
     lv[p] = max(lv[p], e);
     switch (T.kickMode) {
-      case 0: lv[L[1]] = max(lv[L[1]], e * 0.5f); break;                                          // lead 1 (+2 a moitie)
       case 1: lv[L[1]] = max(lv[L[1]], e); break;                                                 // double 1+2
-      case 3: lv[L[0]] = max(lv[L[0]], e * 0.5f); break;                                          // lead 2 (+1 a moitie)
-      case 4: lv[L[1]] = max(lv[L[1]], e * 0.5f); break;                                          // lead 3 (+2 a moitie)
-      case 5: lv[L[2]] = max(lv[L[2]], e * 0.5f); break;                                          // lead 4 (+3 a moitie)
       case 6: lv[L[3]] = max(lv[L[3]], e); break;                                                 // paire 1+4
       case 7: lv[L[2]] = max(lv[L[2]], e); break;                                                 // paire 2+3
     }
@@ -1439,7 +1436,7 @@ static void phareKick(uint32_t quand) {
 // nouvelle phrase (8 mesures) : on choisit comment le kick tombe, et on le garde toute la phrase
 static void phareNouvellePhrase() {
   // le kick change de place a chaque phrase : lead 1, lead 2, double, rebond, lampe 3, lampe 4, paire 1+4, paire 2+3, qui monte
-  static const uint8_t poids[9] = {20, 12, 15, 10, 12, 8, 10, 8, 5};
+  static const uint8_t poids[9] = {14, 14, 4, 6, 16, 14, 11, 11, 10};
   uint8_t r = hw_random8() % 100, m = 0;
   while (m < 8 && r >= poids[m]) { r -= poids[m]; m++; }
   T.kickMode = m;
@@ -1456,6 +1453,8 @@ struct PhareDrop {
   uint32_t t = 0;                // debut de l'etat
   float    roll = 0;             // (inutilise)
   float    pos0 = 0, b0 = 0, bDebut = 0;   // montee : position du roll, temps de reference
+  uint8_t  forme = 0;            // montee : 0 vers le haut, 1 vers le bas, 2 pendule (les montees auto varient)
+  uint8_t  kicksRetour = 0; uint32_t kickPrec = 0;   // le beat revient-il vraiment ?
   float    vitesse = 1, mult = 1;  // montee : ampoules par temps (0,5 a 16), reglage manuel (+ / -)
   bool     suivantAttente = false;
   uint32_t kickVu = 0;           // dernier kick compte
@@ -1468,7 +1467,9 @@ struct PhareDrop {
   uint32_t kickDebut = 0, dureeKick = 0;   // depuis quand le kick tourne / combien de temps il a dure
 };
 static PhareDrop DR;
-static volatile uint8_t phareCmd = 0;       // boutons : 1 montee, 2 drop, 3 suivant
+// boutons : 1 montee, 2 drop, 3 suivant, 4 plus, 5 moins, 6 off -- en file d'attente, aucune commande ne se perd
+static volatile uint8_t phareCmdQ[16]; static volatile uint8_t phareCmdW = 0, phareCmdR = 0;
+static void pharePousse(uint8_t c) { uint8_t w = phareCmdW; phareCmdQ[w % 16] = c; phareCmdW = w + 1; }
 static bool phareSuivantDemande = false;
 static float phareGainSon() { return 0.3f * powf(10.0f, phareSens / 255.0f); }   // sensibilite : x0,3 a x3
 static float phareGateActif() { return 2.0f + (255 - phareSens) / 255.0f * 38.0f; }   // en dessous : silence
@@ -1487,6 +1488,7 @@ static void phareMontee(bool manuel) {
   if (DR.etat == 1 && manuel) { DR.mult = min(16.0f, DR.mult * 2.0f); phareMonteeRate(DR.mult); return; }   // appui suivant = + (jusqu'a x16)
   float b = phareTempsGrille();
   DR.etat = 1; DR.manuel = manuel; DR.t = millis(); DR.mult = 1; DR.vitesse = 1;
+  DR.forme = manuel ? 0 : hw_random8() % 3; DR.kicksRetour = 0; DR.kickPrec = T.lastKick;
   DR.b0 = floorf(b); DR.bDebut = b; DR.pos0 = 0;                             // 1re ampoule tout de suite, la suivante sur le temps
 }
 static bool phareNoirManuel = false;          // bouton "Off" : lumieres coupees, l'ecoute continue
@@ -1519,7 +1521,8 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
   if (temps1) phareMesureN++;
   bool attendre = phareSurLe1 && phareCale();
 
-  uint8_t c = phareCmd; phareCmd = 0;
+  while (phareCmdR != phareCmdW) {
+  uint8_t c = phareCmdQ[phareCmdR % 16]; phareCmdR = phareCmdR + 1;
   if (c >= 1 && c <= 6) DR.manuelT = now;
   if (c == 4 || c == 5) phareMonteeVitesse(c == 4);
   if (c == 6) { phareNoirManuel = !phareNoirManuel; if (phareNoirManuel && DR.etat == 1) DR.etat = 0; }
@@ -1528,6 +1531,7 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
   if (c == 1) phareMontee(true);
   else if (c == 2) { phareDropMaintenant(); phareDropManuel = true; }   // Direct On : le drop part tout de suite
   else if (c == 3) { if (attendre) DR.suivantAttente = true; else phareSuivantDemande = true; }
+  }
   if (DR.suivantAttente && (temps1 || !attendre)) { DR.suivantAttente = false; phareSuivantDemande = true; }
 
   bool nouveauKick = T.kickFlash != DR.kickVu && T.kickFlash >= DR.t;
@@ -1536,13 +1540,23 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
     case 1: {                                                     // MONTEE : roll de plus en plus vite
       // vitesse : double toutes les 2 mesures, et chaque appui sur Montee la double encore (max 16 par temps)
       if (!DR.manuel) {                                           // VJ : double toutes les 2 mesures
-        float cible = (float)(1 << min((int)((phareTempsGrille() - DR.bDebut) / 8.0f), 4));
+        float cible = (float)(1 << min((int)((phareTempsGrille() - DR.bDebut) / 16.0f), 4));   // double toutes les 4 mesures
         if (cible != DR.vitesse) phareMonteeRate(cible);
       }
       if (DR.manuel) { if (now - DR.t > 120000) DR.etat = 0; break; }
-      if (T.lastKick > DR.t + 400 && phareKickActif()) { phareDropMaintenant(); break; }   // le kick revient : DROP
-      if (now - DR.t > 2000 && (silence || T.energie < T.energieLente * 0.35f)) { phareNoir(false); break; }   // la coupure avant le drop
-      if (now - DR.t > 40000) DR.etat = 0;                        // finalement pas de drop
+      // le beat revient vraiment : au moins 3 kicks reguliers (sur les temps)
+      if (T.lastKick != DR.kickPrec && T.lastKick > DR.t + 400) {
+        float ecart = (T.lastKick - DR.kickPrec) / T.period;
+        bool regulier = (ecart > 0.8f && ecart < 1.25f) || (ecart > 1.8f && ecart < 2.25f);
+        DR.kicksRetour = regulier ? DR.kicksRetour + 1 : 1; DR.kickPrec = T.lastKick;
+      }
+      float tempsMontee = phareTempsGrille() - DR.bDebut;
+      if (DR.kicksRetour >= 3) {
+        if (tempsMontee >= 16) { phareDropMaintenant(); break; }  // 4 mesures de montee au moins : DROP
+        DR.etat = 0; DR.fin = now; break;                         // le beat revient trop tot : pas de drop, le VJ reprend
+      }
+      if (tempsMontee > 8 && (silence || T.energie < T.energieLente * 0.35f)) { phareNoir(false); break; }   // la coupure avant le drop
+      if (now - DR.t > 60000) DR.etat = 0;                        // finalement pas de drop
       break;
     }
     case 2:                                                       // NOIR : on attend le kick
@@ -1577,7 +1591,13 @@ static bool phareSurcouche(float* lv, unsigned n) {
     unsigned k = (unsigned)pas % n; float f = pas - floorf(pas);
     float in = constrain(f / 0.12f, 0.0f, 1.0f); in = in * in * (3.0f - 2.0f * in);   // fondu court et net
     if (pas < 1.0f) in = 1.0f;                                    // depart : la lampe 1 s'allume a fond tout de suite
-    lv[k] = in; if (pas >= 1.0f) lv[(k + n - 1) % n] = max(lv[(k + n - 1) % n], 1.0f - in);
+    if (DR.forme == 2) {                                          // pendule rapide, faisceau etroit
+      float y = (n - 1) * (0.5f - 0.5f * cosf(PI * pas));
+      for (unsigned i = 0; i < n; i++) { float d = ((float)i - y) / 0.45f; lv[i] = expf(-d * d); }
+    } else {
+      unsigned kk = DR.forme == 1 ? n - 1 - k : k, pp = DR.forme == 1 ? (n - k) % n : (k + n - 1) % n;   // vers le bas : lampe 4 -> 1
+      lv[kk] = in; if (pas >= 1.0f) lv[pp] = max(lv[pp], 1.0f - in);
+    }
   } else if (DR.etat == 3 && DR.flashs > 0 && DR.flashs <= DR.total && now >= DR.flashT) {
     bool on = now - DR.flashT < (uint32_t)constrain(T.period * 0.45f, 90.0f, 260.0f);   // allume / eteint franc
     for (unsigned i = 0; i < n; i++) lv[i] = (on && (!DR.duo || i < 2)) ? 1.0f : 0.0f;
@@ -1798,6 +1818,8 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   bool vjOrch = Rd.vj && DR.etat == 0 && phareCale();
   if (vjOrch) {
     if (O.formation == 1) for (unsigned i = 0; i < n; i++) lv[i] = 0.0f;                    // kick seul : l'effet se tait
+    if (O.perm && n >= 2) { float t[PHARE_MAX]; for (unsigned i = 0; i < n; i++) t[i] = lv[i];   // l'effet change de lampes
+      for (unsigned i = 0; i < n; i++) lv[i] = O.perm == 1 ? t[n - 1 - i] : t[(i + 2) % n]; }
     if (O.variante == 5) { float a = (T.beatCount % 4 == 0) ? 1.0f : 0.4f; for (unsigned i = 0; i < n; i++) lv[i] *= a; }   // accent sur le 1
     if (O.variante == 7) for (unsigned i = 0; i < n; i++) lv[i] = lv[i] > 0.35f ? 1.0f : 0.0f;                                 // coups secs
   }
@@ -2300,10 +2322,10 @@ static const char _data_FX_MODE_PHARE_MIX[] PROGMEM = "1 Soiree Artifice + basse
 static void phareDropAuto() {
   uint32_t now = millis();
   bool silence = now - T.silenceDepuis > 1500;
-  if (DR.etat == 0 && !phareKickActif() && !silence && !DR.decide && T.lastKick && now - T.lastKick < 6000
+  if (DR.etat == 0 && !phareKickActif() && !silence && !DR.decide && T.lastKick && now - T.lastKick > T.period * 8 && now - T.lastKick < 15000
       && DR.dureeKick > 8000 && now - DR.fin > 3000 && (!DR.manuelT || now - DR.manuelT > 30000)) {
     DR.decide = true;
-    if (hw_random8() < 179) phareMontee(false);
+    if (hw_random8() < 128) phareMontee(false);                // 1 break sur 2
   }
 }
 
@@ -2355,24 +2377,29 @@ static void phareSequence(const uint8_t* seq, unsigned len, unsigned n, float D,
 }
 
 // Roll : du bas vers le haut en boucle
-static void mode_phare_roll(void) {
+static void phareRollCore(bool bas);
+static void mode_phare_roll(void) { phareRollCore(false); }
+static void mode_phare_roll_bas(void) { phareRollCore(true); }
+static void phareRollCore(bool bas) {
   phareAnim();
   unsigned n = phareN(); if (n < 2) FX_FALLBACK_STATIC;
-  uint8_t seq[PHARE_MAX]; for (unsigned i = 0; i < n; i++) seq[i] = i;
+  uint8_t seq[PHARE_MAX]; for (unsigned i = 0; i < n; i++) seq[i] = bas ? n - 1 - i : i;
   float D = phareStepMs(SEGMENT.speed);
   float Dlast = SEGMENT.check1 ? D * 0.4f : D;
   float lv[PHARE_MAX];
   if (Rd.reactif && phareCale()) {                     // une ampoule par temps, qui change pile sur le beat
     float b = phareTempsGrille();
-    unsigned k = (unsigned)b % n; float f = b - floorf(b);
+    unsigned k = (unsigned)b % n, pr = (k + n - 1) % n; float f = b - floorf(b);
+    if (bas) { k = n - 1 - k; pr = n - 1 - pr; }
     float in = phareSmooth(f / 0.1f);
     for (unsigned i = 0; i < n; i++) lv[i] = 0.0f;
-    lv[k] = in; lv[(k + n - 1) % n] = max(lv[(k + n - 1) % n], 1.0f - in);
+    lv[k] = in; lv[pr] = max(lv[pr], 1.0f - in);
     Rd.sansKick = true;                                // pas de couche kick : le roll reste lisible
   } else phareSequence(seq, n, n, D, Dlast, 0.1f + SEGMENT.intensity / 255.0f * 0.9f, lv);
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_ROLL[] PROGMEM = "1 Soiree Roll@Vitesse,Fondu,Veilleuse,,,Retour eclair,;!;;1;sx=150,ix=120,c1=0,o1=1";
+static const char _data_FX_MODE_PHARE_ROLL[] PROGMEM = "1 Soiree Roll haut@Vitesse,Fondu,Veilleuse,,,Retour eclair,;!;;1;sx=150,ix=120,c1=0,o1=1";
+static const char _data_FX_MODE_PHARE_ROLL_BAS[] PROGMEM = "1 Soiree Roll bas@Vitesse,Fondu,Veilleuse,,,Retour eclair,;!;;1;sx=150,ix=120,c1=0,o1=1";
 
 // Rebond : aller-retour bas -> haut -> bas
 static void mode_phare_rebond(void) {
@@ -2387,7 +2414,7 @@ static void mode_phare_rebond(void) {
   phareSequence(seq, len, n, D, D, 0.1f + SEGMENT.intensity / 255.0f * 0.9f, lv);
   phareShow(lv, n, SEGMENT.custom1);
 }
-static const char _data_FX_MODE_PHARE_REBOND[] PROGMEM = "1 Soiree Rebond@Vitesse,Fondu,Veilleuse,,,,;!;;1;sx=150,ix=120,c1=0";
+static const char _data_FX_MODE_PHARE_REBOND[] PROGMEM = "1 Soiree Roll A/R@Vitesse,Fondu,Veilleuse,,,,;!;;1;sx=150,ix=120,c1=0";
 
 // Remplissage : la colonne se remplit, reste pleine, puis s'eteint (ou se vide par le haut)
 static void mode_phare_remplir(void) {
@@ -2815,21 +2842,21 @@ static void mode_phare_dj(void) {
                                       {mode_phare_duos, 80, 255, 20, 0, false, false},      {mode_phare_roll, 80, 255, 20, 0, false, false},
                                       {mode_phare_rebond, 80, 255, 20, 0, false, false},    {mode_phare_flamme, 128, 128, 40, 30, false, false},
                                       {mode_phare_pendule, 128, 140, 15, 0, false, false},  {mode_phare_gonflement, 128, 0, 10, 0, false, false}};
-  static const PhareChoix moyen[]  = {{mode_phare_roll, 150, 120, 0, 0, false, false},    {mode_phare_rebond, 150, 120, 0, 0, false, false},
+  static const PhareChoix moyen[]  = {{mode_phare_roll_bas, 150, 120, 0, 0, false, false},  {mode_phare_roll, 150, 120, 0, 0, false, false},    {mode_phare_rebond, 150, 120, 0, 0, false, false},
                                       {mode_phare_remplir, 150, 60, 0, 0, true, false},     {mode_phare_alternance, 120, 120, 0, 0, true, false},
                                       {mode_phare_clignotant, 128, 80, 0, 0, false, false}, {mode_phare_artifice, 200, 150, 0, 30, false, false},
                                       {mode_phare_duos, 150, 60, 0, 0, false, false},       {mode_phare_batterie, 150, 0, 0, 0, false, false},
                                       {mode_phare_question, 150, 0, 0, 0, false, false},    {mode_phare_ricochet, 0, 60, 0, 0, true, false},
                                       {mode_phare_bass, 200, 128, 0, 30, false, false},     {mode_phare_memoire, 120, 0, 0, 0, false, false},
                                       {mode_phare_pendule, 128, 100, 0, 0, false, false},   {mode_phare_gonflement, 128, 0, 0, 0, false, false}};
-  static const PhareChoix excite[] = {{mode_phare_roll, 200, 60, 0, 0, true, false},      {mode_phare_rebond, 200, 60, 0, 0, false, false},
+  static const PhareChoix excite[] = {{mode_phare_roll_bas, 200, 60, 0, 0, true, false},   {mode_phare_roll, 200, 60, 0, 0, true, false},      {mode_phare_rebond, 200, 60, 0, 0, false, false},
                                       {mode_phare_clignotant, 128, 60, 0, 0, false, false}, {mode_phare_remplir, 200, 30, 0, 0, true, false},
                                       {mode_phare_alternance, 160, 255, 0, 0, false, false}, {mode_phare_artifice, 200, 150, 0, 30, false, false},
                                       {mode_phare_duos, 200, 30, 0, 0, true, false},        {mode_phare_batterie, 200, 0, 0, 0, false, false},
                                       {mode_phare_question, 200, 0, 0, 0, false, false},    {mode_phare_ricochet, 0, 60, 0, 0, false, false},
                                       {mode_phare_scintillement, 128, 0, 0, 0, false, false}, {mode_phare_memoire, 170, 0, 0, 0, false, false}};
   static const PhareChoix* cats[]  = {veille, voix, calme, moyen, excite};
-  static const uint8_t nbCat[]     = {1, 8, 10, 14, 12};
+  static const uint8_t nbCat[]     = {1, 8, 10, 15, 13};
 
   uint8_t cat;
   if (silence) cat = 0;                                     // plus de son : on eteint
@@ -2890,6 +2917,7 @@ static void mode_phare_dj(void) {
     else if (cat == 3)           O.formation = r < 30 ? 0 : (r < 50 ? 1 : (r < 80 ? 2 : 3));
     else                         O.formation = 3;                           // calme / sans kick : gere a part
     O.variante = cat >= 3 ? va : 0;
+    { uint8_t r2 = hw_random8(); O.perm = r2 < 115 ? 0 : (r2 < 200 ? 1 : 2); }   // 45 % telles quelles, 33 % inversees, 22 % decalees
     O.noirFin = cat >= 3 && hw_random8() < 77;                              // 30 %
     O.mesureVide = (cat >= 3 && hw_random8() < 51) ? (hw_random8() & 1 ? 3 : 5) : -1;   // 20 %
     bool caisse = millis() - T.lastSnare < 1500;
@@ -3321,7 +3349,7 @@ function lance(fx){snd('f'+fx);cur=fx;bloque('fm');armFx=-1;marqueTuile();charge
  var t=tuiles[fx];if(t&&t.m!='auto'){dernier[t.m]=fx;try{localStorage.setItem('punto_dernier',JSON.stringify(dernier))}catch(x){}}}
 // griser ce qui ne sert pas
 function gr(el,g){if(el)el.classList.toggle('grise',!!g)}
-function griser(d){var mt=d.mt>0;
+function griser(d){var mt=libre('mt')?d.mt>0:$('bmt').classList.contains('on');
  gr($('reac'),modeVue!='manuel');
  document.querySelectorAll('.mini').forEach(function(b){gr(b,!mt)});
  var h0=document.querySelector('#reglh .h');if(h0)gr(h0,!!d.sg)}
@@ -3345,11 +3373,11 @@ $('bflash').addEventListener('click',function(){snd('x')});
  el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
  setInterval(function(){if(on)snd('m'+Math.round(v*1000))},500)})();
 function offEtat(o){$('boff').classList.toggle('on',o);$('boff').classList.toggle('eteint',o);$('offt').textContent=o?'On':'Off'}
-function monteeStop(){$('bmt').classList.remove('on');$('mtx').textContent=''}
+function monteeStop(){$('bmt').classList.remove('on');$('mtx').textContent='';document.querySelectorAll('.mini').forEach(function(m){gr(m,true)})}
 // boutons VJ : reaction immediate a l'ecran
 document.querySelectorAll('.vj .key').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();press(b);
  var c=b.dataset.b;snd(c=='t'?'t':'b'+c);if(c=='1'||c=='4'||c=='5'||c=='2'||c=='3'||c=='6'){bloque('mt');bloque('dr');bloque('nm')}if(navigator.vibrate)navigator.vibrate(8);
- if(c=='1'&&!b.classList.contains('on')){b.classList.add('on');$('mtx').textContent='×1';c=''}
+ if(c=='1'&&!b.classList.contains('on')){b.classList.add('on');$('mtx').textContent='×1';c='';document.querySelectorAll('.mini').forEach(function(m){gr(m,false)})}
  if(c=='1')c='4';
  if(c=='4'||c=='5'){var x=$('mtx').textContent;if(x){var r=x=='×½'?0.5:parseFloat(x.slice(1));r=c=='4'?Math.min(16,r*2):Math.max(0.5,r/2);$('mtx').textContent=r==0.5?'×½':'×'+r}}
  if(c=='6'){var o=!b.classList.contains('on');offEtat(o);if(o)monteeStop()}
@@ -3503,7 +3531,7 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
     case 'p': pharePads = (uint8_t)atoi(m + 1); break;
     case 'b':
       if (m[1] == 'r') phareSetBri = constrain(atoi(m + 2), 1, 255);    // luminosite
-      else phareCmd = (uint8_t)atoi(m + 1);                             // 1 montee, 2 drop, 3 suivant
+      else pharePousse((uint8_t)atoi(m + 1));                           // 1 montee, 2 drop, 3 suivant, 4 +, 5 -, 6 off
       break;
     case 't': phareTapNow(); break;
     case 'o': phareSetOn = m[1] == '1'; break;                                         // on / off general
@@ -3591,12 +3619,13 @@ class UserFxUsermod : public Usermod {
       {&mode_phare_notes, _data_FX_MODE_PHARE_NOTES},
       {&mode_phare_memoire, _data_FX_MODE_PHARE_MEMOIRE}, {&mode_phare_memoire_e, _data_FX_MODE_PHARE_MEMOIRE_E},
       {&mode_phare_pendule, _data_FX_MODE_PHARE_PENDULE}, {&mode_phare_pendule_e, _data_FX_MODE_PHARE_PENDULE_E},
-      {&mode_phare_gonflement, _data_FX_MODE_PHARE_GONFLEMENT}, {&mode_phare_gonflement_e, _data_FX_MODE_PHARE_GONFLEMENT_E}};
+      {&mode_phare_gonflement, _data_FX_MODE_PHARE_GONFLEMENT}, {&mode_phare_gonflement_e, _data_FX_MODE_PHARE_GONFLEMENT_E},
+      {&mode_phare_roll_bas, _data_FX_MODE_PHARE_ROLL_BAS}};
     for (unsigned i = 0; i < sizeof(neufs) / sizeof(neufs[0]); i++) {
       if (libre) { strip.getModeDataSrc()[1 + i] = libre; phareAjoute(neufs[i].fx, neufs[i].data, 1 + i); }
       else phareAjoute(neufs[i].fx, neufs[i].data);
     }
-    static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_ALLBASS, _data_FX_MODE_PHARE_GRADIENT, _data_FX_MODE_PHARE_DUOS, _data_FX_MODE_PHARE_BATTERIE, _data_FX_MODE_PHARE_QUESTION, _data_FX_MODE_PHARE_RICOCHET, _data_FX_MODE_PHARE_SCINTILLEMENT, _data_FX_MODE_PHARE_NOTES, _data_FX_MODE_PHARE_MEMOIRE, _data_FX_MODE_PHARE_MEMOIRE_E, _data_FX_MODE_PHARE_PENDULE, _data_FX_MODE_PHARE_PENDULE_E, _data_FX_MODE_PHARE_GONFLEMENT, _data_FX_MODE_PHARE_GONFLEMENT_E};
+    static const char* const nos[] = {_data_FX_MODE_PHARE_BASS, _data_FX_MODE_PHARE_FLAMME, _data_FX_MODE_PHARE_ARTIFICE, _data_FX_MODE_PHARE_RESPIMUSIC, _data_FX_MODE_PHARE_DJ, _data_FX_MODE_PHARE_ROLL, _data_FX_MODE_PHARE_REBOND, _data_FX_MODE_PHARE_REMPLIR, _data_FX_MODE_PHARE_BALLE, _data_FX_MODE_PHARE_GOUTTE, _data_FX_MODE_PHARE_ALTERNANCE, _data_FX_MODE_PHARE_CLIGNOTANT, _data_FX_MODE_PHARE_RESPIRATION, _data_FX_MODE_PHARE_BOUGIES, _data_FX_MODE_PHARE_COEUR, _data_FX_MODE_PHARE_DETRESSE, _data_FX_MODE_PHARE_LAVA, _data_FX_MODE_PHARE_ORAGE, _data_FX_MODE_PHARE_NEON, _data_FX_MODE_PHARE_MARIN, _data_FX_MODE_PHARE_PLUIE, _data_FX_MODE_PHARE_SOS, _data_FX_MODE_PHARE_ALLBASS, _data_FX_MODE_PHARE_GRADIENT, _data_FX_MODE_PHARE_DUOS, _data_FX_MODE_PHARE_BATTERIE, _data_FX_MODE_PHARE_QUESTION, _data_FX_MODE_PHARE_RICOCHET, _data_FX_MODE_PHARE_SCINTILLEMENT, _data_FX_MODE_PHARE_NOTES, _data_FX_MODE_PHARE_MEMOIRE, _data_FX_MODE_PHARE_MEMOIRE_E, _data_FX_MODE_PHARE_PENDULE, _data_FX_MODE_PHARE_PENDULE_E, _data_FX_MODE_PHARE_GONFLEMENT, _data_FX_MODE_PHARE_GONFLEMENT_E, _data_FX_MODE_PHARE_ROLL_BAS};
     phareMasquerNatifs(nos, sizeof(nos) / sizeof(nos[0]));
     phareListeFaire(nos, sizeof(nos) / sizeof(nos[0]));
 
@@ -3737,9 +3766,9 @@ class UserFxUsermod : public Usermod {
   void readFromJsonState(JsonObject& root) override {
     JsonObject ph = root[F("phare")];
     if (ph.isNull()) return;
-    if (ph[F("montee")] | 0) phareCmd = 1;
-    if (ph[F("drop")] | 0) phareCmd = 2;
-    if (ph[F("suivant")] | 0) phareCmd = 3;
+    if (ph[F("montee")] | 0) pharePousse(1);
+    if (ph[F("drop")] | 0) pharePousse(2);
+    if (ph[F("suivant")] | 0) pharePousse(3);
   }
 
   // BPM affiche dans l'ecran Info
