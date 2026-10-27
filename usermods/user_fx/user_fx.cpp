@@ -2775,6 +2775,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.3 -apple-sys
 .tiles{margin-top:12px;display:grid;grid-template-columns:repeat(auto-fill,minmax(104px,1fr));gap:8px}
 .tile{padding:12px 8px;border-radius:10px;background:#1c1c21;border:1px solid var(--bd);font-size:13px;text-align:center;min-height:48px;display:flex;align-items:center;justify-content:center}
 .tile.cur{border-color:var(--ac);color:var(--ac)}
+.maj{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:8px;color:var(--mu)}.maj .b{height:48px;padding:0 18px;font-size:14px}
 .sec{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mu);margin:18px 0 0}
 .off{position:fixed;inset:auto 0 0 0;background:#3a1d17;color:#ffcfc4;text-align:center;padding:8px;font-size:13px;display:none}
 @media(max-width:420px){.pad{width:54px;height:54px}.vf{width:56px;height:290px}.b{height:64px}}
@@ -2800,6 +2801,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:15px/1.3 -apple-sys
  <div class="h"><div class="t"><span>-</span><b>Luminosité</b><span>+</span></div><div class="hf" data-k="br"><div class="f"></div><div class="k"></div></div></div>
 </div>
 <div class="sec">Favoris</div><div class="tiles" id="tiles"></div>
+<div class="sec">Firmware</div><div class="maj"><span id="ver">Version …</span><div class="b" id="bmaj">Mettre à jour</div></div><div class="fx" id="majmsg" style="margin-top:8px"></div>
 </div><div class="off" id="off">Connexion au phare…</div>
 <script>
 var ws,last={},pads=0,hold=false,vals={},cur=-1,vjOn=false,drag={};
@@ -2812,6 +2814,8 @@ function conn(){ws=new WebSocket('ws://'+location.host+'/phws');
   document.getElementById('bpm').textContent=d.b?d.b:'--';
   if(d.k){var t=document.getElementById('dot');t.classList.add('on');setTimeout(function(){t.classList.remove('on')},90)}
   if(d.fx!==undefined)document.getElementById('fx').textContent=d.fx;
+  if(d.v!==undefined)document.getElementById('ver').textContent='Version #'+d.v;
+  if(d.um!==undefined)document.getElementById('majmsg').textContent=d.um;
   vjOn=!!d.vj;['sx','c1','ix'].forEach(function(k){document.getElementById('h_'+k).classList.toggle('ok',vjOn)});
   ['sx','c1','ix','se','br'].forEach(function(k){if(d[k]!==undefined&&!drag[k])setH(k,d[k])});
   if(d.fm!==undefined&&d.fm!=cur){cur=d.fm;document.querySelectorAll('.tile').forEach(function(t){t.classList.toggle('cur',t.dataset.fx==cur)})}
@@ -2833,6 +2837,7 @@ document.querySelectorAll('.pad').forEach(function(p){
 document.getElementById('hold').addEventListener('click',function(){hold=!hold;this.classList.toggle('on',hold);if(!hold){pads=0;document.querySelectorAll('.pad').forEach(function(q){q.classList.remove('on')});sendPads()}});
 document.getElementById('sync').addEventListener('click',function(){var on=!this.classList.contains('on');this.classList.toggle('on',on);snd('y'+(on?1:0))});
 document.getElementById('q1').addEventListener('click',function(){var on=!this.classList.contains('on');this.classList.toggle('on',on);document.getElementById('q1t').textContent=on?'Sur le 1':'En direct';snd('q'+(on?1:0))});
+document.getElementById('bmaj').addEventListener('click',function(){document.getElementById('majmsg').textContent='Recherche d\'une nouvelle version…';snd('u')});
 // fader main
 (function(){var el=document.getElementById('main'),k=el.querySelector('.k'),on=false;
  function mv(e){var r=el.getBoundingClientRect(),v=1-(e.clientY-r.top)/r.height;v=Math.max(0,Math.min(1,v));k.style.top=((1-v)*100)+'%';thr('m','m'+Math.round(v*1000))}
@@ -2842,7 +2847,7 @@ document.getElementById('q1').addEventListener('click',function(){var on=!this.c
  el.addEventListener('pointerup',up);el.addEventListener('pointercancel',up);
  setInterval(function(){if(on)snd('m'+Math.round((1-parseFloat(k.style.top)/100)*1000))},500)})();
 // boutons
-document.querySelectorAll('.b').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();b.classList.add('on');snd(b.dataset.b=='t'?'t':'b'+b.dataset.b)});
+document.querySelectorAll('.b[data-b]').forEach(function(b){b.addEventListener('pointerdown',function(e){e.preventDefault();b.classList.add('on');snd(b.dataset.b=='t'?'t':'b'+b.dataset.b)});
  ['pointerup','pointercancel','pointerleave'].forEach(function(ev){b.addEventListener(ev,function(){b.classList.remove('on')})})});
 // faders horizontaux
 function setH(k,v){var el=document.querySelector('.hf[data-k="'+k+'"]');if(!el)return;var p=v/255*100;el.querySelector('.f').style.width=p+'%';el.querySelector('.k').style.left=p+'%';vals[k]=v}
@@ -2862,6 +2867,55 @@ fetch('/presets.json').then(function(r){return r.json()}).then(function(p){var t
 )=====";
 
 static AsyncWebSocket phareWs("/phws");
+
+// ---- mise a jour automatique depuis GitHub (release "punto1-latest") ----
+#include <HTTPClient.h>
+#include <HTTPUpdate.h>
+#include <WiFiClientSecure.h>
+#ifndef PHARE_BUILD
+  #define PHARE_BUILD 0
+#endif
+static const char PHARE_URL_VERSION[]  PROGMEM = "https://github.com/gazelita/WLED/releases/download/punto1-latest/version.txt";
+static const char PHARE_URL_FIRMWARE[] PROGMEM = "https://github.com/gazelita/WLED/releases/download/punto1-latest/firmware.bin";
+static volatile bool phareMajDemande = false;
+static char phareMajMsg[64] = "";
+
+static void phareMajMessage(const char* m) {
+  strlcpy(phareMajMsg, m, sizeof(phareMajMsg));
+  char buf[96]; snprintf(buf, sizeof(buf), "{\"um\":\"%s\"}", phareMajMsg);
+  phareWs.textAll(buf);
+}
+
+static int phareVersionEnLigne() {
+  WiFiClientSecure c; c.setInsecure();
+  HTTPClient h; h.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS); h.setTimeout(8000);
+  if (!h.begin(c, String(FPSTR(PHARE_URL_VERSION)))) return -1;
+  int v = -1;
+  if (h.GET() == 200) v = h.getString().toInt();
+  h.end();
+  return v;
+}
+
+static void phareMiseAJour() {
+  phareMajMessage("Recherche d'une nouvelle version...");
+  int v = phareVersionEnLigne();
+  char m[64];
+  if (v <= 0) { phareMajMessage("Impossible de joindre GitHub"); return; }
+  if (v <= PHARE_BUILD) { snprintf(m, sizeof(m), "Deja a jour (#%d)", PHARE_BUILD); phareMajMessage(m); return; }
+  snprintf(m, sizeof(m), "Installation de la version #%d... (1 min, le phare redemarre)", v); phareMajMessage(m);
+  delay(300);
+  UsermodManager::onUpdateBegin(true);                  // met en pause le micro et les effets pendant l'ecriture
+  strip.suspend();
+  WiFiClientSecure c; c.setInsecure();
+  httpUpdate.setFollowRedirects(HTTPC_FORCE_FOLLOW_REDIRECTS);
+  httpUpdate.rebootOnUpdate(true);
+  t_httpUpdate_return r = httpUpdate.update(c, String(FPSTR(PHARE_URL_FIRMWARE)));
+  // on n'arrive ici qu'en cas d'echec (sinon le phare redemarre)
+  strip.resume();
+  UsermodManager::onUpdateBegin(false);
+  snprintf(m, sizeof(m), "Echec de la mise a jour (%d)", (int)httpUpdate.getLastError()); phareMajMessage(m);
+  (void)r;
+}
 static uint8_t phareIdVJ = 255;
 static volatile int16_t phareSetSx = -1, phareSetIx = -1, phareSetC1 = -1, phareSetBri = -1, phareSetSens = -1;
 static uint32_t phareSensChange = 0;
@@ -2880,6 +2934,7 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
       else phareCmd = (uint8_t)atoi(m + 1);                             // 1 montee, 2 drop, 3 suivant
       break;
     case 't': phareTapNow(); break;
+    case 'u': phareMajDemande = true; break;                                           // mise a jour
     case 'y': phareSync = m[1] == '1'; phareSensChange = millis(); break;               // Sync general
     case 'q': phareSurLe1 = m[1] == '1'; break;                                         // En direct / Sur le 1
     case 'f': phareSetFx = constrain(atoi(m + 1), 0, 254); phareFxMesure = phareMesureN; break;   // changer d'effet
@@ -2987,6 +3042,7 @@ class UserFxUsermod : public Usermod {
 
   void loop() override {
     phareLoop();                                       // tempo, kick, caisse claire, hi-hats
+    if (phareMajDemande) { phareMajDemande = false; phareMiseAJour(); }
     // reglages venus de la page de controle
     Segment& seg = strip.getMainSegment();
     bool vj = seg.mode == phareIdVJ;
@@ -3009,11 +3065,11 @@ class UserFxUsermod : public Usermod {
       envoi = millis();
       char nom[40] = ""; const char* d = strip.getModeData(seg.mode);
       unsigned i = 0; while (i < sizeof(nom) - 1) { char ch = pgm_read_byte(d + i); if (!ch || ch == '@') break; nom[i++] = (ch == '"' || ch == '\\') ? ' ' : ch; } nom[i] = 0;
-      char buf[260];
-      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d}",
+      char buf[380];
+      snprintf(buf, sizeof(buf), "{\"b\":%d,\"k\":%d,\"vj\":%d,\"fx\":\"%s\",\"sx\":%d,\"ix\":%d,\"c1\":%d,\"se\":%d,\"br\":%d,\"fm\":%d,\"mt\":%d,\"dr\":%d,\"sy\":%d,\"s1\":%d,\"v\":%d,\"um\":\"%s\"}",
                phareCale() ? (int)(phareBpm() + 0.5f) : 0, T.kickFlash != kickVu ? 1 : 0, vj ? 1 : 0, nom,
                seg.speed, seg.intensity, seg.custom1, phareSens, bri, seg.mode,
-               DR.etat == 1 ? DR.vitesse : 0, DR.etat >= 2 ? 1 : 0, phareSync ? 1 : 0, phareSurLe1 ? 1 : 0);
+               DR.etat == 1 ? DR.vitesse : 0, DR.etat >= 2 ? 1 : 0, phareSync ? 1 : 0, phareSurLe1 ? 1 : 0, PHARE_BUILD, phareMajMsg);
       kickVu = T.kickFlash;
       phareWs.textAll(buf);
     }

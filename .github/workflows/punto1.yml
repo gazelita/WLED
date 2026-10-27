@@ -6,6 +6,8 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -17,6 +19,8 @@ jobs:
           python-version: '3.12'
       - run: pip install -r requirements.txt
       - run: pio run -e punto1 2>&1 | tee build.log
+        env:
+          PHARE_BUILD: ${{ github.run_number }}
       - name: Diagnostic
         run: |
           echo "::notice::user_fx dans le log: $(grep -ci user_fx build.log)"
@@ -30,3 +34,14 @@ jobs:
         with:
           name: firmware-punto1
           path: .pio/build/punto1/firmware.bin
+      - name: Publier pour la mise a jour automatique
+        if: github.ref == 'refs/heads/punto1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          test -f .pio/build/punto1/firmware.bin
+          echo ${{ github.run_number }} > version.txt
+          gh release view punto1-latest >/dev/null 2>&1 || gh release create punto1-latest --title "Phare punto1" --notes "Firmware du phare, mis a jour a chaque compilation" --target punto1
+          gh release upload punto1-latest .pio/build/punto1/firmware.bin version.txt --clobber
+          gh release edit punto1-latest --title "Phare punto1 #${{ github.run_number }}"
