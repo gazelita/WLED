@@ -2834,7 +2834,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .vj .key small{font:600 12px/1 ui-monospace,"SF Mono",Menlo,monospace;letter-spacing:.04em;color:var(--led);min-height:12px}
 /* metre */
 .meter{display:block}
-.mbox{display:flex;gap:8px}
+.mbox{display:flex;gap:8px}.mbox>*{flex:none}
 .vf.vs{width:40px;height:330px}
 .dots{display:grid;grid-template-rows:repeat(22,1fr);gap:4px;height:330px;padding:6px 7px;background:#0b0b0d;border-radius:8px;box-shadow:inset 0 2px 8px #000}
 .dots i{width:7px;height:7px;border-radius:50%;background:#26272b}
@@ -2871,7 +2871,7 @@ html,body{margin:0;background:var(--bg);color:var(--tx);font:500 13px/1.25 -appl
 .maj .msg{color:var(--mu);font-size:11px;margin-top:6px}
 .off{position:fixed;left:0;right:0;bottom:0;background:#2a0f0a;color:#ffb3a6;text-align:center;padding:9px;font-size:11px;letter-spacing:.14em;text-transform:uppercase;display:none}
 @media(max-width:560px){.r2{grid-template-columns:auto auto auto 1fr}.vj .key{height:84px}
- .meter{grid-column:1/-1}.mbox{flex-direction:row;align-items:center}.dots{grid-template-rows:none;grid-template-columns:repeat(22,1fr);height:auto;flex:1}.lamps{grid-template-rows:none;grid-template-columns:repeat(4,1fr);height:36px;width:84px;padding:0}.lamps i{width:auto;height:36px}.vf.vs{height:150px}}
+ .meter{grid-column:1/-1}.mbox{flex-direction:row;align-items:center}.dots{grid-template-rows:none;grid-template-columns:repeat(22,1fr);height:auto;flex:1}.lamps{grid-template-rows:none;grid-template-columns:repeat(4,1fr);height:36px;width:84px;padding:0}.lamps i{width:100%;height:30px}.lamps{gap:6px;height:auto;width:110px;flex:none}.vf.vs{height:96px!important;width:44px!important;flex:none}.mbox .dots{flex:1 1 auto;min-width:0;gap:3px;grid-template-columns:repeat(22,minmax(0,1fr))!important;padding:6px}.dots i{width:100%;height:auto;aspect-ratio:1;max-width:8px}.meter .cap+.mbox+.cap{display:none}}
 @media(max-width:430px){.pads{grid-template-rows:repeat(4,52px) 38px;width:52px}.vf{width:50px;height:306px}.vf.vb{width:40px}.vj .key,.vj .key.mini{height:62px;font-size:9px;letter-spacing:.1em}.mtrow{grid-template-columns:1fr 1fr}.mtrow .key:first-child{grid-column:1/-1}.mod{padding:8px}.row{gap:7px}}
 </style></head><body><div class="w">
 <div class="top">
