@@ -1511,7 +1511,8 @@ static const uint8_t phareMotifs[PHARE_NB_MOTIFS][16] PROGMEM = {
 static PhareDrop DR;
 static volatile uint32_t phareToucheT = 0;    // dernier geste sur la page (Auto) : le VJ te laisse piloter un moment
 static void (*volatile phareVJImpose)() = nullptr;   // effet choisi par toi, joue par le VJ
-static bool pharePulse = false;               // Pulse : 100 % sur le temps, 70 % entre deux, par-dessus tout
+static bool pharePulse = false;
+static volatile bool phareOrchDemande = false;  // bouton a cote du nom : change la couche (orchestration), pas l'effet               // Pulse : 100 % sur le temps, 70 % entre deux, par-dessus tout
 static bool phareFullAutoPause();             // (defini plus bas)
 // boutons : 1 montee, 2 drop, 3 suivant, 4 plus, 5 moins, 6 off -- en file d'attente, aucune commande ne se perd
 static volatile uint8_t phareCmdQ[16]; static volatile uint8_t phareCmdW = 0, phareCmdR = 0;
@@ -1534,7 +1535,7 @@ static void phareMontee(bool manuel) {
   if (DR.etat == 1 && manuel) { DR.mult = min(16.0f, DR.mult * 2.0f); phareMonteeRate(DR.mult); return; }   // appui suivant = + (jusqu'a x16)
   float b = phareTempsGrille();
   DR.etat = 1; DR.manuel = manuel; DR.t = millis(); DR.mult = 1; DR.vitesse = 1;
-  DR.forme = manuel ? 0 : hw_random8() % 3; DR.kicksRetour = 0; DR.kickPrec = T.lastKick;
+  DR.forme = hw_random8() % 3;   // roll vers le haut / vers le bas / pendule (aussi a la main) DR.kicksRetour = 0; DR.kickPrec = T.lastKick;
   DR.b0 = floorf(b); DR.bDebut = b; DR.pos0 = 0;                             // 1re ampoule tout de suite, la suivante sur le temps
 }
 static bool phareNoirManuel = false;          // bouton "Off" : lumieres coupees, l'ecoute continue
@@ -1552,7 +1553,9 @@ static uint32_t phareVJVu = 0;               // derniere image jouee par le VJ
 static uint8_t phareApresVJ = 0;             // 1 : Artifice 8 mesures ; 2 : All bass 4 + Artifice 4 (joue par le VJ)
 static uint32_t phareApresDebut = 0;
 static bool phareDropManuel = false;
+static volatile bool phareDropFaders = false;   // drop : Energie 80 %, Douceur 20 %
 static void phareDropMaintenant()   {
+  phareDropFaders = true;
   // 8 flashs en general, 4 une fois sur quatre ; jamais deux fois de suite le meme type
   uint8_t ty; do { uint8_t r = hw_random8() % 100; ty = r < 20 ? 0 : (r < 35 ? 1 : (r < 45 ? 2 : (r < 55 ? 3 : (r < 65 ? 4 : (r < 77 ? 5 : (r < 89 ? 6 : 7)))))); } while (ty == DR.typePrec);
   DR.motif = hw_random8() % PHARE_NB_MOTIFS;
@@ -1583,7 +1586,7 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
   if (c == 2) phareNoirManuel = false;
   if (c == 3 && DR.etat == 1) { DR.etat = 0; DR.fin = now; }   // Suivant arrete la montee
   if (c == 1) phareMontee(true);
-  else if (c == 2) { phareDropMaintenant(); phareDropManuel = true; }   // Direct On : le drop part tout de suite
+  else if (c == 2) { phareDropMaintenant(); phareDropManuel = true; DR.manuel = true; }   // Direct On : le drop part tout de suite
   else if (c == 3) { if (attendre) DR.suivantAttente = true; else phareSuivantDemande = true; }
   }
   if (DR.suivantAttente && (temps1 || !attendre)) { DR.suivantAttente = false; phareSuivantDemande = true; }
@@ -1619,7 +1622,10 @@ static void phareDropLoop(uint32_t now, uint32_t dt, float vol) {
       else if (!DR.manuel && now - DR.t > 4000) { DR.etat = 0; DR.fin = now; }
       break;
     case 3:                                                       // FLASHS sur chaque kick
-      if (phareCale()) {                                          // cale sur les temps de la musique
+      if (phareDropManuel) {                                      // bouton Drop : un flash par temps, sans attendre les kicks
+        float per = phareCale() ? T.period : 480.0f;
+        if (DR.flashs > 0 && now - DR.flashT >= (uint32_t)per) { DR.flashs++; DR.flashT += (uint32_t)per; }
+      } else if (phareCale()) {                                          // cale sur les temps de la musique
         if (T.lastTick >= DR.t && T.lastTick != DR.kickVu && (DR.flashs == 0 || T.lastTick > DR.flashT + (uint32_t)(T.period * 0.5f))) {
           DR.kickVu = T.lastTick; DR.flashs++; DR.flashT = T.lastTick; }
       } else if (T.kickFlash != DR.kickVu && T.kickFlash >= DR.t && (DR.flashs == 0 || T.kickFlash > DR.flashT + (uint32_t)(T.period * 0.5f))) {
@@ -1970,8 +1976,14 @@ static void phareRendu(const float* lv0, unsigned n, uint8_t veilleuse) {
   // Pulse : 100 % sur le temps, 70 % entre deux (interrupteur, et automatique pendant les drops)
   if ((pharePulse || DR.etat == 3) && !phareNoirManuel) {
     float fr = phareCale() ? constrain((now - T.lastTick) / T.period, 0.0f, 1.0f) : constrain((now - T.kickFlash) / T.period, 0.0f, 1.0f);
-    float pu = 0.7f + 0.3f * max(0.0f, 1.0f - fr / 0.35f);
-    for (unsigned i = 0; i < n; i++) lv[i] *= pu;
+    float k = max(0.0f, 1.0f - fr / 0.35f), pu = 0.7f + 0.3f * k;
+    for (unsigned i = 0; i < n; i++) lv[i] = min(lv[i] * pu, 0.9f + 0.1f * k);   // plein feu : 90 % max hors du temps
+    if (pharePulse && DR.etat != 3) {                                             // lampes vides : 35 % sur le temps
+      bool vague = ((T.beatCount / 4) * 2654435761u) >> 31;                      // une mesure sur deux : vague rapide, sinon flash
+      float y = (n - 1) * constrain(fr / 0.3f, 0.0f, 1.0f);
+      for (unsigned i = 0; i < n; i++) {
+        float v = vague ? (fr < 0.4f ? max(0.0f, 1.0f - fabsf((float)i - y)) : 0.0f) : k;
+        lv[i] = max(lv[i], 0.35f * v); } }
   }
   // a la main : le fader deplace la lumiere, les boutons allument les lampes
   float m = phareMainPos;
@@ -3105,7 +3117,8 @@ static void mode_phare_dj(void) {
   if (d->vite && (!cale || (tempsNeuf && (!phareSurLe1 || T.beatCount % 4 == 0)))) { finPhrase = true; d->vite = false; }
   bool change = (SEGENV.call == 0) || d->cat == 255;
   bool suivant = phareSuivantDemande; phareSuivantDemande = false;
-  if (suivant) change = true;
+  if (suivant) { change = true; phareVJImpose = nullptr; }
+  bool orch = phareOrchDemande; phareOrchDemande = false;
   // en calme / sans beat, l'effet dure 2 phrases (16 mesures) ; breakdown melodique (Full auto) : 4 phrases
   bool phraseUtile = finPhrase && (cat >= 3 || (pool == 5 ? phraseIdx % 4 == 0 : phraseIdx % 2 == 0) || !cale);
   if (cat != d->cat || pool != d->pool) {
@@ -3133,6 +3146,10 @@ static void mode_phare_dj(void) {
     }
     d->idx = nv; d->cat = cat; d->pool = pool; d->choix = now;
     memmove(d->hist + 1, d->hist, 3 * sizeof(uint16_t)); d->hist[0] = (pool << 8) | (nv << 3) | va; if (d->nHist < 4) d->nHist++;
+  }
+  if (change || orch) {
+    if (!change) { cat = d->cat; pool = d->pool; }
+    uint8_t nv = d->idx, va = hw_random8() < 100 ? 0 : 1 + hw_random8() % 7;
     d->sansKick = hw_random8() < 26;                            // 1 phrase sur 10 sans la couche kick
     // orchestration de la phrase : formation (densite selon l'energie), variante de temps, respirations
     float rap = T.energie / max(T.energieTres, 1.0f);
@@ -3191,10 +3208,14 @@ static void mode_phare_dj(void) {
   Rd.calme = d->cat == 2;
   // apres un drop manuel : le VJ enchaine Artifice (8 mesures) ou All bass (4) puis Artifice (4), puis reprend
   if (phareApresVJ) {
-    static const PhareChoix art = {mode_phare_artifice, 200, 150, 0, 30, false, false}, all = {mode_phare_allbass, 200, 128, 0, 30, false, false};
-    static const PhareChoix* joue = nullptr;
+    static const PhareChoix apres[6] = {{mode_phare_artifice, 200, 150, 0, 30, false, false}, {mode_phare_allbass, 200, 128, 0, 30, false, false},
+      {mode_phare_kickbass, 200, 150, 0, 30, false, false}, {mode_phare_sequenceur, 200, 150, 0, 30, false, false},
+      {mode_phare_veilleuse_techno, 200, 150, 0, 30, false, false}, {mode_phare_clignotant, 200, 100, 0, 30, false, true}};
+    static const PhareChoix* joue = nullptr; static uint8_t a1 = 0, a2 = 1, aPrec = 255; static uint32_t aDebut = 0xFFFFFFFF;
     uint32_t m = phareMesureN - phareApresDebut;
-    const PhareChoix* c = (phareApresVJ == 2 && m < 4) ? &all : &art;
+    if (aDebut != phareApresDebut) { aDebut = phareApresDebut;   // nouveau drop : 2 effets de 4 mesures (ou 1 de 8)
+      do a1 = hw_random8() % 6; while (a1 == aPrec); do a2 = hw_random8() % 6; while (a2 == a1); aPrec = a1; if (phareApresVJ == 1) a2 = a1; }
+    const PhareChoix* c = &apres[m < 4 ? a1 : a2];
     if (m >= 8) { phareApresVJ = 0; joue = nullptr; phareSuivantDemande = true; }   // le VJ reprend avec un nouvel effet
     else { bool neuf = c != joue; joue = c; Rd.max3 = false; phareJoue(*c, neuf, 0); return; }
   }
@@ -3466,6 +3487,8 @@ body:before{content:"";position:fixed;inset:-30%;z-index:-1;background:conic-gra
 .tile{flex-direction:column;gap:3px}.tile .ico{font-size:17px;line-height:1;color:var(--org2);text-shadow:0 0 6px #ff6a0088}.tile.cur .ico{color:#2a0503;text-shadow:none}
 .lcd{cursor:pointer;touch-action:manipulation}
 @media(max-width:560px){.r1{grid-template-columns:1fr 1fr}.r1>.seg3{grid-column:1/-1}}
+#bcouche{display:inline-grid;place-items:center;width:28px;height:28px;margin-left:8px;border-radius:50%;border:1px solid #ff9b2766;color:#ff9b27;font-size:15px;cursor:pointer;vertical-align:middle;touch-action:manipulation}
+#bcouche:active{background:#ff9b2733}
 </style></head><body><div class="w">
 <div class="top">
  <div class="logo"><svg class="car" viewBox="0 0 200 104" aria-hidden="true">
@@ -3520,7 +3543,7 @@ body:before{content:"";position:fixed;inset:-30%;z-index:-1;background:conic-gra
    <div class="key hot" data-b="2" id="bdr"><span class="led"></span><svg viewBox="0 0 24 24"><path d="M12 2v4M12 18v4M2 12h4M18 12h4M4.9 4.9l2.8 2.8M16.3 16.3l2.8 2.8M4.9 19.1l2.8-2.8M16.3 7.7l2.8-2.8"/><circle cx="12" cy="12" r="2.5"/></svg>Drop<small></small></div>
    <div class="key" data-b="3" id="bsv"><span class="led"></span><svg viewBox="0 0 24 24"><path d="m5 5 9 7-9 7z"/><path d="M19 5v14"/></svg>Suivant<small></small></div>
    <div class="key" data-b="t" id="btp"><span class="led"></span><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="2.5"/></svg>Tap<small></small></div>
-   <div class="encours"><span class="led on"></span><span id="fx">—</span></div>
+   <div class="encours"><span class="led on"></span><span id="fx">—</span><span class="vueAuto"><span id="bcouche" title="Changer la couche (pas l'effet)">⟳</span></span></div>
    <div class="vjinfo" id="vi"></div>
   </div></div>
   <div class="mod meter"><div class="cap">Son</div><div class="mbox"><div class="dots" id="dots"></div><div class="lamps" id="lamps"><i></i><i></i><i></i><i></i></div><div class="vf vb vs" id="sens"><div class="fill"></div><div class="k"></div></div></div><div class="cap" style="margin-top:8px;text-align:right">Sensib.</div></div>
@@ -3618,6 +3641,7 @@ $('inv').addEventListener('pointerdown',function(e){e.preventDefault();var on=!t
 // Auto : Full auto / Control
 function vjmEtat(a){document.querySelectorAll('#vjm div').forEach(function(x){x.classList.toggle('on',x.dataset.a==a)})}
 document.querySelectorAll('#vjm div').forEach(function(x){x.addEventListener('pointerdown',function(e){e.preventDefault();vjmEtat(x.dataset.a);bloque('fa');snd('a'+x.dataset.a)})});
+$('bcouche').addEventListener('pointerdown',function(e){e.preventDefault();snd('q');press(this)});
 $('lcd').addEventListener('pointerdown',function(e){e.preventDefault();snd('w');$('bpm').textContent='···';press(this)});
 // modes : Auto / Manuel / Expo (chaque mode n'affiche que ses commandes)
 var modeReel='manuel',modeVue='',modeForce=0,dernier={manuel:-1,expo:-1},tuiles={};
@@ -3839,7 +3863,8 @@ static void phareWsEvent(AsyncWebSocket*, AsyncWebSocketClient* client, AwsEvent
     case 'j': { int id = atoi(m + 1); for (uint8_t r = 0; r < phareRegN; r++) if (phareRegId[r] == id) phareVJImpose = phareRegFx[r];   // effet joue par le VJ
                 phareToucheT = millis(); break; }
     case 'w': T.nOn = 0; T.conf = 0; T.votes = 0; T.candidat = 0; T.period = 500.0f; phareBpmVu = 0; break;   // BPM : on repart de zero
-    case 'u': pharePulse = m[1] == '1'; phareSensChange = millis(); break;                                       // Pulse
+    case 'u': pharePulse = m[1] == '1'; phareSensChange = millis(); break;
+    case 'q': phareOrchDemande = true; phareToucheT = millis(); break;   // nouvelle couche, meme effet
     case 'a': phareFullAuto = m[1] == '1'; phareSensChange = millis(); break;                                        // Full auto / Control
     case 'n': phareInverse = m[1] == '1'; phareSensChange = millis(); break;                                       // Inverser
     case 's':
@@ -3954,6 +3979,7 @@ class UserFxUsermod : public Usermod {
     // reglages venus de la page de controle
     Segment& seg = strip.getMainSegment();
     bool vj = seg.mode == phareIdVJ;
+    if (phareDropFaders) { phareDropFaders = false; phareSetSx = 204; phareSetC1 = 51; }   // drop : Energie 80 %, Douceur 20 %
     if (phareSetSx >= 0) { if (vj) seg.speed = phareSetSx; phareSetSx = -1; }
     if (phareSetIx >= 0) { if (vj) seg.intensity = phareSetIx; phareSetIx = -1; }
     if (phareSetC1 >= 0) { if (vj) seg.custom1 = phareSetC1; phareSetC1 = -1; }
